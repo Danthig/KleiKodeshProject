@@ -50,20 +50,28 @@ namespace KleiKodesh.Ribbon
             Execute(id);
         }
 
+        public void ExecuteFromHotKey()
+        {
+            ExecuteSelectionSearch("fts");
+        }
+
         // Right-click context-menu items: push the current Word selection into the
         // Kitvei Hakodesh app as a search. Both items reuse the running task pane (or
         // launch it) and then call SearchFromHost on the live AppViewer — the text is
         // stripped of non-word characters app-side before searching.
         public void contextMenu_Click(Office.IRibbonControl control)
         {
+            string target = control.Id.IndexOf("Catalog", StringComparison.Ordinal) >= 0
+                ? "catalog"
+                : "fts";
+
+            ExecuteSelectionSearch(target);
+        }
+
+        private void ExecuteSelectionSearch(string target)
+        {
             try
             {
-                string target = control.Id.IndexOf("Catalog", StringComparison.Ordinal) >= 0
-                    ? "catalog"
-                    : "fts";
-
-                // Search items live only on the text-selection menu, so a real
-                // selection is expected here.
                 string text = Globals.ThisAddIn.Application.Selection?.Text;
                 if (string.IsNullOrWhiteSpace(text))
                     return;
