@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: sync-upstream-release
+  cancel-in-progress: false
+
 jobs:
   sync-build-release:
     runs-on: windows-latest
@@ -33,12 +37,25 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit upstream-release
+          if ($LASTEXITCODE -ne 0) {
+            git merge --abort
+            Write-Host "Merge conflict detected. The release will not be built." -ForegroundColor Red
+            exit 1
+          }
           git push origin HEAD:master
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
 
       - name: Build installer
         shell: pwsh
         run: |
-          .\Build\scripts\build-installer.ps1 -ManualVersion $env:UPSTREAM_RELEASE -NoRelease -AnyCpuOnly -ReleaseNotesSource commits
+          .\Build\scripts\build-installer.ps1 `
+            -ManualVersion $env:UPSTREAM_RELEASE `
+            -NoRelease `
+            -ReleaseNotesSource commits
 
       - name: Publish fork release
         shell: pwsh
@@ -46,9 +63,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = $env:UPSTREAM_RELEASE
-          $asset = "Build/releases/KleiKodeshSetup-$version.exe"
-          $portable = "Build/releases/KitveiHakodeshPortable-$version.zip"
-          if (-not (Test-Path $asset)) { throw "Installer was not produced: $asset" }
+          $releaseDir = "Build/releases"
+          $assets = @(
+            "$releaseDir/KleiKodeshSetup-$version.exe",
+            "$releaseDir/KleiKodeshSetup-$version-x64.exe",
+            "$releaseDir/KleiKodeshSetup-$version-x86.exe",
+            "$releaseDir/KitveiHakodeshPortable-$version.zip"
+          )
+
+          foreach ($asset in $assets) {
+            if (-not (Test-Path $asset)) {
+              throw "Missing release asset: $asset"
+            }
+          }
+
           $existing = gh release view $version --repo "${{ github.repository }}" 2>$null
-          if ($LASTEXITCODE -eq 0) { gh release delete $version --repo "${{ github.repository }}" --yes }
-          gh release create $version $asset $portable --repo "${{ github.repository }}" --title "KleiKodesh $version" --generate-notes --target master
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $version `
+              --repo "${{ github.repository }}" `
+              --yes `
+              --cleanup-tag
+          }
+
+          gh release create $version `
+            $assets `
+            --repo "${{ github.repository }}" `
+            --title "KleiKodesh $version" `
+            --generate-notes `
+            --target master
