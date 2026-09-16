@@ -9,6 +9,7 @@ namespace KleiKodesh
         private bool _disposed;
 
         public event EventHandler HotKeyPressed;
+        public IntPtr LastHotKeyId { get; private set; }
 
         public NativeHotKeyWindow()
         {
@@ -21,7 +22,10 @@ namespace KleiKodesh
         protected override void WndProc(ref Message message)
         {
             if (message.Msg == WM_HOTKEY)
+            {
+                LastHotKeyId = message.WParam;
                 HotKeyPressed?.Invoke(this, EventArgs.Empty);
+            }
 
             base.WndProc(ref message);
         }

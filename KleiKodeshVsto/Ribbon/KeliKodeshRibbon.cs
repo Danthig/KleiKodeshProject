@@ -50,9 +50,9 @@ namespace KleiKodesh.Ribbon
             Execute(id);
         }
 
-        public void ExecuteFromHotKey()
+        public void ExecuteFromHotKey(string target)
         {
-            ExecuteSelectionSearch("fts");
+            ExecuteSelectionSearch(target);
         }
 
         // Right-click context-menu items: push the current Word selection into the
@@ -268,7 +268,7 @@ namespace KleiKodesh.Ribbon
                         break;
                     case "Settings":
                         //TaskPaneManager.Show(new RibbonSettingsControl(ribbon), "הגדרות כלי קודש", 400);
-                        WpfTaskPane.Show(new RibbonSettingsView(ribbon), "הגדרות התוסף", 400);
+                        WpfTaskPane.Show(new RibbonSettingsView(ribbon, Globals.ThisAddIn.ReconfigureHotKeys), "הגדרות התוסף", 400);
                         break;
                     case "About":
                         OpenAboutDocument();

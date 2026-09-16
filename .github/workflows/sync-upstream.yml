@@ -1,0 +1,57 @@
+name: Sync upstream and publish fork release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync-build-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure upstream remote
+        shell: pwsh
+        run: |
+          git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
+          git fetch upstream master --tags
+
+      - name: Merge upstream changes
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit upstream/master
+          git push origin HEAD:master
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = Select-String -Path "Build/Installer/Helpers/AddinInstaller.cs" -Pattern 'const string Version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1 |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if (-not $version) { throw "Could not read installer version" }
+          .\Build\scripts\build-installer.ps1 -ManualVersion $version -NoRelease -AnyCpuOnly -ReleaseNotesSource commits
+
+      - name: Publish fork release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = Select-String -Path "Build/Installer/Helpers/AddinInstaller.cs" -Pattern 'const string Version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1 |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $asset = "Build/releases/KleiKodeshSetup-$version.exe"
+          $portable = "Build/releases/KitveiHakodeshPortable-$version.zip"
+          if (-not (Test-Path $asset)) { throw "Installer was not produced: $asset" }
+          $existing = gh release view $version --repo "${{ github.repository }}" 2>$null
+          if ($LASTEXITCODE -eq 0) { gh release delete $version --repo "${{ github.repository }}" --yes }
+          gh release create $version $asset $portable --repo "${{ github.repository }}" --title "KleiKodesh $version" --generate-notes --target master

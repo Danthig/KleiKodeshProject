@@ -2,6 +2,7 @@
 using KleiKodesh.Ribbon;
 using KitveiHakodeshLib.Pdf;
 using UpdateCheckerLib;
+using KleiKodesh.Helpers;
 using Office = Microsoft.Office.Core;
 using System;
 using System.Diagnostics;
@@ -12,13 +13,21 @@ namespace KleiKodesh
 {
     public partial class ThisAddIn
     {
-        private const int HotKeyId = 0x4B4B;
+        private const int CopySearchHotKeyId = 0x4B4B;
+        private const int CatalogSearchHotKeyId = 0x4B4C;
+        private const string HotKeySection = "HotKeys";
+        private const string CopySearchHotKeySetting = "CopySearch";
+        private const string CatalogSearchHotKeySetting = "CatalogSearch";
+        private const string DefaultCopySearchHotKey = "Ctrl+Alt+K";
+        private const string DefaultCatalogSearchHotKey = "Ctrl+Alt+B";
+        private const uint MOD_SHIFT = 0x0004;
+        private const uint MOD_NOREPEAT = 0x4000;
         private const uint MOD_ALT = 0x0001;
         private const uint MOD_CONTROL = 0x0002;
-        private const uint VK_K = 0x4B;
 
         private NativeHotKeyWindow _hotKeyWindow;
-        private bool _hotKeyRegistered;
+        private bool _copySearchHotKeyRegistered;
+        private bool _catalogSearchHotKeyRegistered;
         private KeliKodeshRibbon _ribbon;
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -70,7 +79,7 @@ namespace KleiKodesh
 
             WordToPdfConverter.HostApplication = this.Application;
             WordThesaurusProvider.HostApplication = this.Application;
-            InitializeHotKey();
+            InitializeHotKeys();
         }
 
         private void ThisAddIn_Shutdown(object sender, System.EventArgs e)
@@ -81,9 +90,15 @@ namespace KleiKodesh
             UpdateChecker.RunPendingInstaller();
         }
 
-        private void InitializeHotKey()
+        public void ReconfigureHotKeys()
         {
-            if (_hotKeyWindow != null || _hotKeyRegistered)
+            ShutdownHotKey();
+            InitializeHotKeys();
+        }
+
+        private void InitializeHotKeys()
+        {
+            if (_hotKeyWindow != null)
                 return;
 
             try
@@ -91,21 +106,25 @@ namespace KleiKodesh
                 _hotKeyWindow = new NativeHotKeyWindow();
                 _hotKeyWindow.HotKeyPressed += HotKeyWindow_HotKeyPressed;
 
-                _hotKeyRegistered = RegisterHotKey(
-                    _hotKeyWindow.Handle,
-                    HotKeyId,
-                    MOD_CONTROL | MOD_ALT,
-                    VK_K);
+                var copySearchHotKey = ParseHotKey(SettingsManager.Get(
+                    HotKeySection, CopySearchHotKeySetting, DefaultCopySearchHotKey));
+                var catalogSearchHotKey = ParseHotKey(SettingsManager.Get(
+                    HotKeySection, CatalogSearchHotKeySetting, DefaultCatalogSearchHotKey));
 
-                if (!_hotKeyRegistered)
+                _copySearchHotKeyRegistered = RegisterHotKey(
+                    _hotKeyWindow.Handle, CopySearchHotKeyId,
+                    copySearchHotKey.Modifiers | MOD_NOREPEAT, copySearchHotKey.VirtualKey);
+                _catalogSearchHotKeyRegistered = _copySearchHotKeyRegistered && RegisterHotKey(
+                    _hotKeyWindow.Handle, CatalogSearchHotKeyId,
+                    catalogSearchHotKey.Modifiers | MOD_NOREPEAT, catalogSearchHotKey.VirtualKey);
+
+                if (!_copySearchHotKeyRegistered || !_catalogSearchHotKeyRegistered)
                 {
                     int errorCode = Marshal.GetLastWin32Error();
-                    _hotKeyWindow.HotKeyPressed -= HotKeyWindow_HotKeyPressed;
-                    _hotKeyWindow.Dispose();
-                    _hotKeyWindow = null;
+                    ShutdownHotKey();
                     MessageBox.Show(
-                        "לא ניתן לרשום את קיצור המקשים Ctrl+Alt+K. " +
-                        "ייתכן שהוא כבר נמצא בשימוש על ידי תוכנה אחרת. " +
+                        "לא ניתן לרשום אחד מקיצורי המקשים של החיפוש. " +
+                        "ייתכן שאחד מהם כבר נמצא בשימוש על ידי תוכנה אחרת. " +
                         "קוד שגיאה: " + errorCode,
                         "קיצור מקשים",
                         MessageBoxButtons.OK,
@@ -114,13 +133,7 @@ namespace KleiKodesh
             }
             catch (Exception ex)
             {
-                _hotKeyRegistered = false;
-                if (_hotKeyWindow != null)
-                {
-                    _hotKeyWindow.HotKeyPressed -= HotKeyWindow_HotKeyPressed;
-                    _hotKeyWindow.Dispose();
-                    _hotKeyWindow = null;
-                }
+                ShutdownHotKey();
 
                 MessageBox.Show(
                     "אירעה שגיאה באתחול קיצור המקשים: " + ex.Message,
@@ -134,15 +147,21 @@ namespace KleiKodesh
         {
             try
             {
-                if (_hotKeyRegistered && _hotKeyWindow != null && _hotKeyWindow.Handle != IntPtr.Zero)
-                    UnregisterHotKey(_hotKeyWindow.Handle, HotKeyId);
+                if (_hotKeyWindow != null && _hotKeyWindow.Handle != IntPtr.Zero)
+                {
+                    if (_copySearchHotKeyRegistered)
+                        UnregisterHotKey(_hotKeyWindow.Handle, CopySearchHotKeyId);
+                    if (_catalogSearchHotKeyRegistered)
+                        UnregisterHotKey(_hotKeyWindow.Handle, CatalogSearchHotKeyId);
+                }
             }
             catch
             {
             }
             finally
             {
-                _hotKeyRegistered = false;
+                _copySearchHotKeyRegistered = false;
+                _catalogSearchHotKeyRegistered = false;
                 if (_hotKeyWindow != null)
                 {
                     _hotKeyWindow.HotKeyPressed -= HotKeyWindow_HotKeyPressed;
@@ -170,13 +189,42 @@ namespace KleiKodesh
                 {
                     if (_ribbon == null)
                         _ribbon = new KeliKodeshRibbon();
-                    _ribbon.ExecuteFromHotKey();
+                    var hotKeyId = (int)((NativeHotKeyWindow)sender).LastHotKeyId;
+                    _ribbon.ExecuteFromHotKey(hotKeyId == CatalogSearchHotKeyId ? "catalog" : "fts");
                 }
             }
             catch (Exception ex)
             {
                 MessageBox.Show(ex.Message, "שגיאה בהפעלת קיצור המקשים");
             }
+        }
+
+        private sealed class ParsedHotKey
+        {
+            public uint Modifiers { get; set; }
+            public uint VirtualKey { get; set; }
+        }
+
+        private static ParsedHotKey ParseHotKey(string value)
+        {
+            var parts = (value ?? string.Empty).Split('+');
+            uint modifiers = 0;
+            string key = parts[parts.Length - 1];
+            foreach (var part in parts)
+            {
+                if (part == "Ctrl") modifiers |= MOD_CONTROL;
+                else if (part == "Alt") modifiers |= MOD_ALT;
+                else if (part == "Shift") modifiers |= MOD_SHIFT;
+            }
+
+            if (key.Length != 1 || !char.IsLetterOrDigit(key[0]))
+                return ParseHotKey(DefaultCopySearchHotKey);
+
+            return new ParsedHotKey
+            {
+                Modifiers = modifiers,
+                VirtualKey = char.ToUpperInvariant(key[0])
+            };
         }
 
         #region VSTO generated code

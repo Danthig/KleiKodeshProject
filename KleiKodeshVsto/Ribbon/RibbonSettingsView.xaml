@@ -100,6 +100,20 @@
                       Content="כבה בדיקת עדכונים אוטומטית"
                       Margin="0,0,0,8"/>
 
+            <Border Style="{StaticResource Card}">
+                <Expander IsExpanded="True">
+                    <Expander.Header>
+                        <TextBlock Style="{StaticResource GroupHeader}" Text="קיצורי חיפוש בוורד"/>
+                    </Expander.Header>
+                    <StackPanel Margin="0,8,0,0">
+                        <TextBlock Text="העתק לחיפוש" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CopySearchHotKey" Margin="0,0,0,8"/>
+                        <TextBlock Text="חיפוש ספר" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CatalogSearchHotKey" Margin="0"/>
+                    </StackPanel>
+                </Expander>
+            </Border>
+
             <Button x:Name="BtnReset" Content="איפוס התוכנה"/>
 
         </StackPanel>
