@@ -22,33 +22,30 @@ jobs:
         shell: pwsh
         run: |
           git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
-          git fetch upstream master --tags
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/KleiKodesh/KleiKodeshProject/releases/latest" -Headers @{ "User-Agent" = "KleiKodesh-ForkSync" }
+          if ($release.tag_name -notmatch '^v\d+\.\d+\.\d+$') { throw "Invalid upstream release tag: $($release.tag_name)" }
+          "UPSTREAM_RELEASE=$($release.tag_name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+          git fetch upstream "refs/tags/$($release.tag_name):refs/tags/upstream-release"
 
       - name: Merge upstream changes
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-edit upstream/master
+          git merge --no-edit upstream-release
           git push origin HEAD:master
 
       - name: Build installer
         shell: pwsh
         run: |
-          $version = Select-String -Path "Build/Installer/Helpers/AddinInstaller.cs" -Pattern 'const string Version\s*=\s*"([^"]+)"' |
-            Select-Object -First 1 |
-            ForEach-Object { $_.Matches[0].Groups[1].Value }
-          if (-not $version) { throw "Could not read installer version" }
-          .\Build\scripts\build-installer.ps1 -ManualVersion $version -NoRelease -AnyCpuOnly -ReleaseNotesSource commits
+          .\Build\scripts\build-installer.ps1 -ManualVersion $env:UPSTREAM_RELEASE -NoRelease -AnyCpuOnly -ReleaseNotesSource commits
 
       - name: Publish fork release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = Select-String -Path "Build/Installer/Helpers/AddinInstaller.cs" -Pattern 'const string Version\s*=\s*"([^"]+)"' |
-            Select-Object -First 1 |
-            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $version = $env:UPSTREAM_RELEASE
           $asset = "Build/releases/KleiKodeshSetup-$version.exe"
           $portable = "Build/releases/KitveiHakodeshPortable-$version.zip"
           if (-not (Test-Path $asset)) { throw "Installer was not produced: $asset" }

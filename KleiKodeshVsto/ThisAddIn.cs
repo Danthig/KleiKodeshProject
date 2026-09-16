@@ -8,6 +8,8 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace KleiKodesh
 {
@@ -28,6 +30,8 @@ namespace KleiKodesh
         private NativeHotKeyWindow _hotKeyWindow;
         private bool _copySearchHotKeyRegistered;
         private bool _catalogSearchHotKeyRegistered;
+        private string _activeCopySearchHotKey;
+        private string _activeCatalogSearchHotKey;
         private KeliKodeshRibbon _ribbon;
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -90,16 +94,27 @@ namespace KleiKodesh
             UpdateChecker.RunPendingInstaller();
         }
 
-        public void ReconfigureHotKeys()
+        public bool ReconfigureHotKeys()
         {
+            string previousCopy = _activeCopySearchHotKey;
+            string previousCatalog = _activeCatalogSearchHotKey;
             ShutdownHotKey();
-            InitializeHotKeys();
+            if (InitializeHotKeys())
+                return true;
+
+            if (!string.IsNullOrEmpty(previousCopy) && !string.IsNullOrEmpty(previousCatalog))
+            {
+                SettingsManager.Save(HotKeySection, CopySearchHotKeySetting, previousCopy);
+                SettingsManager.Save(HotKeySection, CatalogSearchHotKeySetting, previousCatalog);
+                InitializeHotKeys();
+            }
+            return false;
         }
 
-        private void InitializeHotKeys()
+        private bool InitializeHotKeys()
         {
             if (_hotKeyWindow != null)
-                return;
+                return true;
 
             try
             {
@@ -110,6 +125,8 @@ namespace KleiKodesh
                     HotKeySection, CopySearchHotKeySetting, DefaultCopySearchHotKey));
                 var catalogSearchHotKey = ParseHotKey(SettingsManager.Get(
                     HotKeySection, CatalogSearchHotKeySetting, DefaultCatalogSearchHotKey));
+                if (copySearchHotKey == null || catalogSearchHotKey == null)
+                    throw new InvalidOperationException("פורמט קיצור מקשים לא תקין");
 
                 _copySearchHotKeyRegistered = RegisterHotKey(
                     _hotKeyWindow.Handle, CopySearchHotKeyId,
@@ -129,7 +146,13 @@ namespace KleiKodesh
                         "קיצור מקשים",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
+                    return false;
                 }
+                _activeCopySearchHotKey = SettingsManager.Get(
+                    HotKeySection, CopySearchHotKeySetting, DefaultCopySearchHotKey);
+                _activeCatalogSearchHotKey = SettingsManager.Get(
+                    HotKeySection, CatalogSearchHotKeySetting, DefaultCatalogSearchHotKey);
+                return true;
             }
             catch (Exception ex)
             {
@@ -140,6 +163,7 @@ namespace KleiKodesh
                     "קיצור מקשים",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
+                return false;
             }
         }
 
@@ -203,6 +227,13 @@ namespace KleiKodesh
         {
             public uint Modifiers { get; set; }
             public uint VirtualKey { get; set; }
+            public int WordKeyCode { get; set; }
+        }
+
+        internal static int? ParseHotKeyForWord(string value)
+        {
+            var parsed = ParseHotKey(value);
+            return parsed == null ? (int?)null : parsed.WordKeyCode;
         }
 
         private static ParsedHotKey ParseHotKey(string value)
@@ -217,13 +248,24 @@ namespace KleiKodesh
                 else if (part == "Shift") modifiers |= MOD_SHIFT;
             }
 
-            if (key.Length != 1 || !char.IsLetterOrDigit(key[0]))
-                return ParseHotKey(DefaultCopySearchHotKey);
+            uint virtualKey;
+            if (key.Length == 1 && char.IsLetterOrDigit(key[0]))
+                virtualKey = char.ToUpperInvariant(key[0]);
+            else if (key.StartsWith("F", StringComparison.OrdinalIgnoreCase) &&
+                     int.TryParse(key.Substring(1), out int functionNumber) &&
+                     functionNumber >= 1 && functionNumber <= 24)
+                virtualKey = (uint)(0x70 + functionNumber - 1);
+            else
+                return null;
 
             return new ParsedHotKey
             {
                 Modifiers = modifiers,
-                VirtualKey = char.ToUpperInvariant(key[0])
+                VirtualKey = virtualKey,
+                WordKeyCode = (int)virtualKey +
+                    ((modifiers & MOD_SHIFT) != 0 ? 256 : 0) +
+                    ((modifiers & MOD_CONTROL) != 0 ? 512 : 0) +
+                    ((modifiers & MOD_ALT) != 0 ? 1024 : 0)
             };
         }
 

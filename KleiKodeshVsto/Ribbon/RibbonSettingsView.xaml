@@ -107,9 +107,17 @@
                     </Expander.Header>
                     <StackPanel Margin="0,8,0,0">
                         <TextBlock Text="העתק לחיפוש" Margin="0,0,0,4"/>
-                        <ComboBox x:Name="CopySearchHotKey" Margin="0,0,0,8"/>
+                        <TextBox x:Name="CopySearchHotKey" Margin="0,0,0,8"
+                                 PreviewKeyDown="HotKeyTextBox_PreviewKeyDown"
+                                 PreviewMouseDown="HotKeyTextBox_PreviewMouseDown"
+                                 ToolTip="לחץ כאן והקש את צירוף המקשים הרצוי"/>
                         <TextBlock Text="חיפוש ספר" Margin="0,0,0,4"/>
-                        <ComboBox x:Name="CatalogSearchHotKey" Margin="0"/>
+                        <TextBox x:Name="CatalogSearchHotKey"
+                                 PreviewKeyDown="HotKeyTextBox_PreviewKeyDown"
+                                 PreviewMouseDown="HotKeyTextBox_PreviewMouseDown"
+                                 ToolTip="לחץ כאן והקש את צירוף המקשים הרצוי"/>
+                        <TextBlock Text="יש לבחור Ctrl, Alt או Shift יחד עם מקש. הקיצור ייבדק מול Word ומול קיצורים אחרים."
+                                   Opacity="0.7" Margin="0,8,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
                 </Expander>
             </Border>

@@ -1,6 +1,8 @@
 using KleiKodesh.Helpers;
 using System.Linq;
 using System;
+using System.Collections.Generic;
+using System.Windows.Input;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -9,9 +11,9 @@ namespace KleiKodesh.Ribbon
     public partial class RibbonSettingsView : UserControl
     {
         private readonly Microsoft.Office.Core.IRibbonUI _ribbon;
-        private readonly Action _hotKeysChanged;
+        private readonly Func<bool> _hotKeysChanged;
 
-        public RibbonSettingsView(Microsoft.Office.Core.IRibbonUI ribbon, Action hotKeysChanged)
+        public RibbonSettingsView(Microsoft.Office.Core.IRibbonUI ribbon, Func<bool> hotKeysChanged)
         {
             InitializeComponent();
             _ribbon = ribbon;
@@ -59,13 +61,8 @@ namespace KleiKodesh.Ribbon
             ChkTurnOffUpdates.Checked   += (_, __) => SettingsManager.Save("UpdateChecker", "TurnOffUpdates", true);
             ChkTurnOffUpdates.Unchecked += (_, __) => SettingsManager.Save("UpdateChecker", "TurnOffUpdates", false);
 
-            var hotKeyOptions = new[] { "Ctrl+Alt+K", "Ctrl+Alt+B", "Ctrl+Shift+K", "Ctrl+Shift+B", "Ctrl+K", "Ctrl+B" };
-            CopySearchHotKey.ItemsSource = hotKeyOptions;
-            CatalogSearchHotKey.ItemsSource = hotKeyOptions;
-            CopySearchHotKey.SelectedItem = SettingsManager.Get("HotKeys", "CopySearch", "Ctrl+Alt+K");
-            CatalogSearchHotKey.SelectedItem = SettingsManager.Get("HotKeys", "CatalogSearch", "Ctrl+Alt+B");
-            CopySearchHotKey.SelectionChanged += (_, __) => SaveHotKeys();
-            CatalogSearchHotKey.SelectionChanged += (_, __) => SaveHotKeys();
+            CopySearchHotKey.Text = SettingsManager.Get("HotKeys", "CopySearch", "Ctrl+Alt+K");
+            CatalogSearchHotKey.Text = SettingsManager.Get("HotKeys", "CatalogSearch", "Ctrl+Alt+B");
 
             BtnReset.Click += (_, __) =>
             {
@@ -75,22 +72,107 @@ namespace KleiKodesh.Ribbon
                     if (rb is RadioButton) rb.IsChecked = false;
                 Settings_Option.IsChecked = true;
                 ChkTurnOffUpdates.IsChecked = false;
-                CopySearchHotKey.SelectedItem = "Ctrl+Alt+K";
-                CatalogSearchHotKey.SelectedItem = "Ctrl+Alt+B";
+                CopySearchHotKey.Text = "Ctrl+Alt+K";
+                CatalogSearchHotKey.Text = "Ctrl+Alt+B";
                 SettingsManager.ClearAll();
                 MessageBox.Show("התוכנה אופסה בהצלחה - אנא התחל את וורד מחדש");
             };
         }
 
+        private void HotKeyTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            ((TextBox)sender).Focus();
+            e.Handled = true;
+        }
+
+        private void HotKeyTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            e.Handled = true;
+            if (e.Key == Key.LeftCtrl || e.Key == Key.RightCtrl ||
+                e.Key == Key.LeftAlt || e.Key == Key.RightAlt ||
+                e.Key == Key.LeftShift || e.Key == Key.RightShift)
+                return;
+
+            var hotKey = FormatHotKey(e);
+            if (hotKey == null)
+            {
+                MessageBox.Show("יש לבחור לפחות אחד מהמקשים Ctrl, Alt או Shift יחד עם מקש נוסף.", "קיצור מקשים");
+                return;
+            }
+
+            var textBox = (TextBox)sender;
+            string other = ReferenceEquals(textBox, CopySearchHotKey)
+                ? CatalogSearchHotKey.Text
+                : CopySearchHotKey.Text;
+            if (string.Equals(hotKey, other, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("קיצור זה כבר משויך לפעולת החיפוש האחרת.", "קיצור מקשים");
+                return;
+            }
+
+            if (IsWordShortcutAssigned(hotKey))
+            {
+                MessageBox.Show("קיצור זה כבר מוקצה ב-Word לפקודה או למאקרו. בחר קיצור אחר.", "קיצור מקשים");
+                return;
+            }
+
+            textBox.Text = hotKey;
+            SaveHotKeys();
+        }
+
+        private static string FormatHotKey(KeyEventArgs e)
+        {
+            var modifiers = new List<string>();
+            if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) modifiers.Add("Ctrl");
+            if ((Keyboard.Modifiers & ModifierKeys.Alt) != 0) modifiers.Add("Alt");
+            if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) modifiers.Add("Shift");
+            if (modifiers.Count == 0) return null;
+
+            Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+            string keyName = key.ToString();
+            if (keyName.StartsWith("D", StringComparison.Ordinal) && keyName.Length == 2)
+                keyName = keyName.Substring(1);
+            else if (keyName.StartsWith("NumPad", StringComparison.Ordinal))
+                keyName = "Num" + keyName.Substring(6);
+
+            return string.Join("+", modifiers) + "+" + keyName;
+        }
+
+        private bool IsWordShortcutAssigned(string hotKey)
+        {
+            try
+            {
+                var parsed = ThisAddIn.ParseHotKeyForWord(hotKey);
+                if (parsed == null) return true;
+                dynamic keyBindings = Globals.ThisAddIn.Application.KeyBindings;
+                foreach (Microsoft.Office.Interop.Word.WdKeyCategory category in new[]
+                    { Microsoft.Office.Interop.Word.WdKeyCategory.wdKeyCategoryCommand,
+                      Microsoft.Office.Interop.Word.WdKeyCategory.wdKeyCategoryMacro })
+                {
+                    dynamic binding = keyBindings.FindKey(parsed.Value, category);
+                    if (binding != null) return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
         private void SaveHotKeys()
         {
-            if (CopySearchHotKey.SelectedItem == null || CatalogSearchHotKey.SelectedItem == null)
-                return;
-            if (string.Equals(CopySearchHotKey.SelectedItem.ToString(), CatalogSearchHotKey.SelectedItem.ToString(), StringComparison.OrdinalIgnoreCase))
-                return;
-            SettingsManager.Save("HotKeys", "CopySearch", CopySearchHotKey.SelectedItem);
-            SettingsManager.Save("HotKeys", "CatalogSearch", CatalogSearchHotKey.SelectedItem);
-            _hotKeysChanged?.Invoke();
+            string oldCopy = SettingsManager.Get("HotKeys", "CopySearch", "Ctrl+Alt+K");
+            string oldCatalog = SettingsManager.Get("HotKeys", "CatalogSearch", "Ctrl+Alt+B");
+            SettingsManager.Save("HotKeys", "CopySearch", CopySearchHotKey.Text);
+            SettingsManager.Save("HotKeys", "CatalogSearch", CatalogSearchHotKey.Text);
+            if (_hotKeysChanged != null && !_hotKeysChanged())
+            {
+                SettingsManager.Save("HotKeys", "CopySearch", oldCopy);
+                SettingsManager.Save("HotKeys", "CatalogSearch", oldCatalog);
+                CopySearchHotKey.Text = oldCopy;
+                CatalogSearchHotKey.Text = oldCatalog;
+            }
         }
     }
 }

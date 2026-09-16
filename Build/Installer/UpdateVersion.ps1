@@ -7,6 +7,7 @@ param(
 )
 
 # Derive sibling paths from $FilePath (which points to AddinInstaller.cs)
+$FilePath = [System.IO.Path]::GetFullPath($FilePath)
 $projectDir   = Split-Path -Parent (Split-Path -Parent $FilePath)   # Build/Installer/
 $csprojPath   = Join-Path $projectDir "KleiKodeshVstoInstallerWpf.csproj"
 $repoRoot     = Split-Path -Parent (Split-Path -Parent $projectDir) # repo root
@@ -129,6 +130,6 @@ try {
 
 } catch {
     Write-Host "Error updating version: $_"
-    Write-Host "Using fallback version v1.0.16"
-    Update-AllVersionTargets "v1.0.16"
+    Write-Host "Version update failed; refusing to write a fallback version." -ForegroundColor Red
+    exit 1
 }
