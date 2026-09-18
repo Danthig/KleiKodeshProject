@@ -40,7 +40,7 @@ const pages: Record<string, unknown> = {
   '/txt-view': defineAsyncComponent(() => import('@/features/txt-view/TxtViewPage.vue')),
   '/settings': defineAsyncComponent(() => import('@/features/settings/SettingsPage.vue')),
   '/hebrewbooks': defineAsyncComponent(
-    () => import('@/features/hebrewbooks/HebrewBooksPage.vue'),
+    () => import('@/layout/HebrewBooksWorkspace.vue'),
   ),
   '/search': defineAsyncComponent(() => import('@/features/full-text-search/FullTextSearchPage.vue')),
   '/hebrew-calendar': defineAsyncComponent(

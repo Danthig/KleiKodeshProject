@@ -124,6 +124,8 @@ export interface Tab {
   // Query typed into the HebrewBooks page (route '/hebrewbooks'), saved so the
   // input survives a tab switch and back. Cleared when the tab navigates in place.
   hebrewBooksSearchQuery?: string
+  /** Keeps the HebrewBooks catalog mounted while its selected PDF is shown beside it. */
+  hebrewBooksCatalogHost?: boolean
   tocPath?: string
   /** Persisted — true when this /html-view tab is hosting an Otzaria addin (manifest.json detected next to the HTML file). */
   isOtzariaAddin?: boolean

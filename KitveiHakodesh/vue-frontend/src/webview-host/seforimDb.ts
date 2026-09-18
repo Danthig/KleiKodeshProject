@@ -14,7 +14,7 @@ import { ref } from 'vue'
  * Remember the architecture it selects between: hosted does NOT use the KitveiHakodesh service —
  * KitveiHakodeshLib owns the data and the native calls there. Only dev goes through the service.
  */
-export const hasHostBridge = typeof window.__webviewAction === 'function'
+export const hasHostBridge = typeof window !== 'undefined' && typeof window.__webviewAction === 'function'
 
 /**
  * Whether the seforim DB is available.
@@ -23,7 +23,7 @@ export const hasHostBridge = typeof window.__webviewAction === 'function'
  * Dev: always true — the service resolves and owns the DB; SetupWizard asks it separately
  * (getDbPathInfo) whether the file actually exists on disk.
  */
-export const dbReady = ref(window.__webviewDbReady ?? true)
+export const dbReady = ref(typeof window !== 'undefined' ? (window.__webviewDbReady ?? true) : true)
 
 /** True once detected; false means the column doesn't exist or detection hasn't run yet. */
 export let categoryHasOrderIndex = false
@@ -121,7 +121,7 @@ export function emitWebviewEvent(msg: Record<string, unknown>): void {
 
 // Only the C# host pushes events into this channel; in dev the bridge functions call
 // emitWebviewEvent directly after their service round-trip.
-if (hasHostBridge) {
+if (typeof window !== 'undefined' && hasHostBridge) {
   window.__onWebviewEvent = (msg) => {
     for (const fn of _listeners) fn(msg)
   }

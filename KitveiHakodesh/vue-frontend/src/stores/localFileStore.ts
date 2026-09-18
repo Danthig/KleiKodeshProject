@@ -353,10 +353,16 @@ export const useLocalFileStore = defineStore('localFile', () => {
   /** Navigate a tab to /pdf-view placeholder while a HebrewBooks download is in progress.
    *  When a bookId is given (dev), start polling the service for live download progress so the
    *  loading text under the spinner shows MB / %. */
-  function startHbDownload(bookTitle: string, tabId: string, bookId?: string) {
+  function startHbDownload(
+    bookTitle: string,
+    tabId: string,
+    bookId?: string,
+    keepCatalogVisible = false,
+  ) {
     _converting.add(tabId)
     tabStore.updateTab(tabId, {
-      route: '/pdf-view',
+      route: keepCatalogVisible ? '/hebrewbooks' : '/pdf-view',
+      hebrewBooksCatalogHost: keepCatalogVisible,
       title: bookTitle,
       localFileName: bookTitle,
       // Stamp the book id NOW (not only on success) so ביטול mid-download can identify this as a
@@ -395,7 +401,7 @@ export const useLocalFileStore = defineStore('localFile', () => {
     if (!_converting.has(tabId)) return
     _converting.delete(tabId)
     tabStore.updateTab(tabId, {
-      route: '/pdf-view',
+      route: liveTab.hebrewBooksCatalogHost ? '/hebrewbooks' : '/pdf-view',
       title: bookTitle,
       localFileVirtualUrl: url,
       localFileName: bookTitle,

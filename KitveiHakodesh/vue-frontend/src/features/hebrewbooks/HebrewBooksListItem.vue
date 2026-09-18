@@ -11,6 +11,7 @@ import { wantsNewTab, withNewTabHint } from '@/composables/useOpenInNewTab'
 const props = defineProps<{ book: HebrewBook; focused?: boolean; hasLocalFile?: boolean }>()
 const emit = defineEmits<{
   'book-clicked': [book: HebrewBook, openInNewTab: boolean]
+  'book-double-clicked': [book: HebrewBook]
   'download-clicked': [book: HebrewBook]
   'delete-clicked': [book: HebrewBook]
   'reveal-clicked': [book: HebrewBook]
@@ -42,6 +43,7 @@ const tooltip = computed(() => {
     :class="{ 'is-focused': focused }"
     :title="tooltip"
     @click="emit('book-clicked', book, wantsNewTab($event))"
+    @dblclick="emit('book-double-clicked', book)"
     @auxclick.middle="emit('book-clicked', book, wantsNewTab($event))"
   >
     <div class="row-top">

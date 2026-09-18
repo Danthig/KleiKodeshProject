@@ -29,7 +29,7 @@ declare global {
  * Controls visibility of the "חלון עצמאי / חלונית" button in the hamburger menu.
  * Defaults to false in all other environments (standalone demo, browser dev).
  */
-export const showPopOutButton = window.__webviewShowPopOut === true
+export const showPopOutButton = typeof window !== 'undefined' && window.__webviewShowPopOut === true
 
 /**
  * True when running inside the VSTO task-pane context (Word add-in).

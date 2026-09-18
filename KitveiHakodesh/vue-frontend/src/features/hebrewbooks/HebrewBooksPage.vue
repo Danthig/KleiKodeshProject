@@ -9,15 +9,17 @@ import { useHebrewBooks } from './useHebrewBooks'
 import { useInputListNavigation } from '@/composables/useInputListNavigation'
 import { useLocalFileStore } from '@/stores/localFileStore'
 import { useTabStore } from '@/stores/tabStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { usePaneNavigation } from '@/composables/usePaneNavigation'
 import { storeToRefs } from 'pinia'
 
 const localFileStore = useLocalFileStore()
+const settingsStore = useSettingsStore()
 const tabStore = useTabStore()
 const paneNavigation = usePaneNavigation()
 const { downloadErrorMessage } = storeToRefs(localFileStore)
+const { hebrewBooksLocalFolder } = storeToRefs(settingsStore)
 
-// This tab's id, captured at mount, for per-tab query persistence.
 const hebrewBooksTabId = paneNavigation.activeTabId
 
 const {
@@ -36,6 +38,7 @@ const {
 
 const searchInputRef = ref<HTMLInputElement>()
 const scrollEl = ref<HTMLElement | null>(null)
+let clickTimer: ReturnType<typeof setTimeout> | null = null
 
 const virtualizer = useVirtualizer(
   computed(() => ({
@@ -46,8 +49,6 @@ const virtualizer = useVirtualizer(
   })),
 )
 
-// Combobox model: focus stays in the search input; its keydown moves the list
-// highlight, Enter opens the highlighted book (Ctrl+Enter in a new tab).
 const { activeIndex, onKeydown: onSearchInputKeydown } = useInputListNavigation({
   getCount: () => displayedBooks.value.length,
   onActivate: (i, openInNewTab) => openBook(displayedBooks.value[i]!, openInNewTab),
@@ -55,13 +56,22 @@ const { activeIndex, onKeydown: onSearchInputKeydown } = useInputListNavigation(
     virtualizer.value as unknown as import('@tanstack/vue-virtual').Virtualizer<Element, Element>,
 })
 
-// New results make the old highlight point at a different book — drop it.
+const selectedBookId = computed(() => paneNavigation.activeTab.localFileHbBookId)
+
+const resultsSummary = computed(() => {
+  if (isLoading.value) return 'טוען ספרים…'
+  if (error.value) return 'שגיאה בטעינת הרשימה'
+  if (!displayedBooks.value.length) {
+    return searchTerm.value ? `לא נמצאו תוצאות ל"${searchTerm.value}"` : 'אין ספרים להצגה'
+  }
+  if (!searchTerm.value) return `מוצגים ${displayedBooks.value.length} ספרים`
+  return `מוצגים ${displayedBooks.value.length} תוצאות עבור "${searchTerm.value}"`
+})
+
 watch(displayedBooks, () => {
   activeIndex.value = -1
 })
 
-// Restore the query saved on the tab so switching away and back keeps the input.
-// A non-empty saved query runs the catalog search; otherwise load() shows history.
 onMounted(() => {
   const saved = paneNavigation.activeTab.hebrewBooksSearchQuery
   if (saved) search(saved)
@@ -69,12 +79,8 @@ onMounted(() => {
   searchInputRef.value?.focus()
 })
 
-// On unmount, mirror the file-search / catalog rule:
-//  • Tab still '/hebrewbooks' (tab switch, or a NEW tab opened via Ctrl+click) →
-//    save the query so it restores when the user returns to this tab.
-//  • Tab navigated in place to a book (startHbDownload set route '/pdf-view') →
-//    clear it.
 onBeforeUnmount(() => {
+  if (clickTimer) clearTimeout(clickTimer)
   const tab = tabStore.tabs.find((t) => t.id === hebrewBooksTabId)
   const stillHebrewBooks = tab?.route === '/hebrewbooks'
   tabStore.updateTab(hebrewBooksTabId, {
@@ -82,13 +88,35 @@ onBeforeUnmount(() => {
   })
 })
 
+function clearSearch() {
+  search('')
+  searchInputRef.value?.focus()
+}
+
 function onBookClicked(
   i: number,
   book: (typeof displayedBooks.value)[number],
   openInNewTab = false,
 ) {
   activeIndex.value = i
-  openBook(book, openInNewTab)
+  if (openInNewTab) {
+    openBook(book, true)
+    return
+  }
+  if (clickTimer) clearTimeout(clickTimer)
+  clickTimer = setTimeout(() => {
+    clickTimer = null
+    openBook(book)
+  }, 220)
+}
+
+function onBookDoubleClicked(i: number, book: (typeof displayedBooks.value)[number]) {
+  activeIndex.value = i
+  if (clickTimer) {
+    clearTimeout(clickTimer)
+    clickTimer = null
+  }
+  openBook(book, true)
 }
 </script>
 
@@ -100,15 +128,40 @@ function onBookClicked(
         ref="searchInputRef"
         :value="searchTerm"
         type="search"
-        placeholder="חפש ספרים, מחברים או נושאים..."
+        placeholder="ספרים, מחברים או נושאים"
         class="search-input"
         dir="rtl"
+        aria-label="חיפוש ספרים"
         @input="search(($event.target as HTMLInputElement).value)"
         @keydown="onSearchInputKeydown"
+        @keydown.esc.prevent="clearSearch"
       />
+      <template #right>
+        <button
+          v-if="searchTerm"
+          type="button"
+          class="clear-btn"
+          aria-label="נקה חיפוש"
+          @click="clearSearch"
+        >
+          <IconDismiss20Regular />
+        </button>
+      </template>
     </TopSearchBar>
 
-    <div ref="scrollEl" class="hb-list">
+    <div class="hb-summary" v-if="!isLoading && !error">
+      <span>{{ resultsSummary }}</span>
+      <span v-if="hebrewBooksLocalFolder" class="hb-folder-badge">תיקייה מקומית</span>
+    </div>
+
+    <div
+      ref="scrollEl"
+      class="hb-list"
+      tabindex="0"
+      role="listbox"
+      aria-label="רשימת ספרי HebrewBooks"
+      @keydown="onSearchInputKeydown"
+    >
       <LoadingAnimation v-if="isLoading" />
 
       <div v-else-if="error" class="state">{{ error }}</div>
@@ -130,9 +183,10 @@ function onBookClicked(
           >
             <HebrewBooksListItem
               :book="displayedBooks[vRow.index]!"
-              :focused="activeIndex === vRow.index"
+              :focused="activeIndex === vRow.index || String(displayedBooks[vRow.index]!.id) === String(selectedBookId)"
               :has-local-file="localFileBookIds.has(String(displayedBooks[vRow.index]!.id))"
               @book-clicked="(book, openInNewTab) => onBookClicked(vRow.index, book, openInNewTab)"
+              @book-double-clicked="(book) => onBookDoubleClicked(vRow.index, book)"
               @download-clicked="downloadBook"
               @delete-clicked="deleteLocalFile"
               @reveal-clicked="revealInFolder"
@@ -143,8 +197,7 @@ function onBookClicked(
 
       <div v-else class="state">
         <span class="state-icon">📚</span>
-        <span v-if="searchTerm">לא נמצאו ספרים</span>
-        <span v-else>אין היסטוריה — חפש ספר להתחיל</span>
+        <span>{{ searchTerm ? `לא נמצאו תוצאות עבור “${searchTerm}”` : 'אין ספרים להציג' }}</span>
       </div>
     </div>
 
@@ -165,11 +218,41 @@ function onBookClicked(
   background: var(--bg-primary);
 }
 
+.hb-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.hb-folder-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .hb-list {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   outline: none;
+  direction: rtl;
+}
+
+.hb-list:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
 }
 
 .state {
@@ -192,11 +275,21 @@ function onBookClicked(
 .search-icon {
   color: var(--text-secondary);
 }
-/* Fill, border, outline, colors, placeholder and the search-cancel button all come
-   from the global `.search-inner input` rule; the type size comes from TopSearchBar. */
+
 .search-input {
   flex: 1;
   direction: rtl;
+}
+
+.clear-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
 }
 
 .hb-error-banner {
