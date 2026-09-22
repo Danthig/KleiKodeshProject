@@ -158,12 +158,6 @@ jobs:
           Write-Host "Restoring DocumentLocator SDK project"
           Write-Host "========================================"
 
-          # DocumentLocator is an SDK-style project inside the
-          # KitveiHakodesh/DocumentLocator submodule.
-          #
-          # Its net48 target requires project.assets.json, so it must
-          # be explicitly restored before the legacy service project
-          # attempts to build it.
           $documentLocatorProject = `
             "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\DocumentLocator.csproj"
 
@@ -194,10 +188,6 @@ jobs:
           Write-Host "========================================"
           Write-Host "Restoring legacy packages.config projects"
           Write-Host "========================================"
-
-          # This repository uses multiple packages directories.
-          # Each packages.config is restored into the directory expected
-          # by the corresponding project HintPath / Import statements.
 
           $legacyRestores = @(
             @{
@@ -246,24 +236,33 @@ jobs:
             },
 
             # ------------------------------------------------------------
-            # DocumentLocator submodule
+            # DocumentLocator core library
             # ------------------------------------------------------------
 
-            # DocumentLocator core library:
-            # packages.config is located directly under DocumentLocator,
-            # therefore packages must also be restored directly there.
             @{
               Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
             },
 
-            # DocumentLocator Windows service:
-            # packages.config is under DocumentLocator.Service, but its
-            # HintPaths/imports expect the same DocumentLocator\packages
-            # directory.
+            # ------------------------------------------------------------
+            # DocumentLocator service - restore into its local packages
+            # because EmbeddedResource entries use ..\packages
+            # ------------------------------------------------------------
+
             @{
               Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
+            },
+
+            # ------------------------------------------------------------
+            # DocumentLocator service - restore the same packages into
+            # the main repository packages directory because its HintPaths
+            # use ..\..\..\..\packages
+            # ------------------------------------------------------------
+
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
+              Packages = ".\packages"
             }
           )
 
@@ -291,11 +290,50 @@ jobs:
               -Verbosity normal
 
             if ($LASTEXITCODE -ne 0) {
-              throw "NuGet restore failed for $($restore.Config) with exit code $LASTEXITCODE"
+              throw "NuGet restore failed for $($restore.Config) into $($restore.Packages) with exit code $LASTEXITCODE"
             }
 
-            Write-Host "[OK] $($restore.Config)"
+            Write-Host "[OK] $($restore.Config) -> $($restore.Packages)"
           }
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "Installing legacy DocumentLocator dependency"
+          Write-Host "========================================"
+
+          # DocumentLocator.Service.csproj contains an old EmbeddedResource
+          # reference to Unsafe 4.3.0 even though packages.config uses 6.1.2.
+          #
+          # The project therefore needs this legacy package physically present
+          # in DocumentLocator\packages for the compiler to embed the DLL.
+          $documentLocatorPackages = `
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $documentLocatorPackages |
+            Out-Null
+
+          & nuget.exe install `
+            "System.Runtime.CompilerServices.Unsafe" `
+            -Version "4.3.0" `
+            -OutputDirectory $documentLocatorPackages `
+            -NonInteractive `
+            -Verbosity normal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install System.Runtime.CompilerServices.Unsafe 4.3.0"
+          }
+
+          $legacyUnsafe = `
+            "$documentLocatorPackages\System.Runtime.CompilerServices.Unsafe.4.3.0\lib\netstandard1.0\System.Runtime.CompilerServices.Unsafe.dll"
+
+          if (-not (Test-Path $legacyUnsafe)) {
+            throw "Legacy Unsafe DLL was not installed: $legacyUnsafe"
+          }
+
+          Write-Host "[OK] System.Runtime.CompilerServices.Unsafe 4.3.0"
 
           Write-Host ""
           Write-Host "========================================"
@@ -339,13 +377,13 @@ jobs:
             ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
 
             # ------------------------------------------------------------
-            # WpfLib SDK-style restore
+            # WpfLib
             # ------------------------------------------------------------
 
             ".\WpfLib\obj\project.assets.json",
 
             # ------------------------------------------------------------
-            # DocumentLocator SDK-style restore
+            # DocumentLocator SDK restore
             # ------------------------------------------------------------
 
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json",
@@ -374,7 +412,47 @@ jobs:
 
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll",
 
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets"
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
+            # ------------------------------------------------------------
+            # DocumentLocator legacy EmbeddedResource
+            # ------------------------------------------------------------
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Runtime.CompilerServices.Unsafe.4.3.0\lib\netstandard1.0\System.Runtime.CompilerServices.Unsafe.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Lucene.Net.4.8.0-beta00016\lib\net45\Lucene.Net.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\J2N.2.0.0\lib\net45\J2N.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Prism.Core.7.2.0.1422\lib\net45\Prism.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Configuration.Abstractions.1.1.2\lib\netstandard1.0\Microsoft.Extensions.Configuration.Abstractions.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Primitives.1.1.1\lib\netstandard1.0\Microsoft.Extensions.Primitives.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll",
+
+            # ------------------------------------------------------------
+            # DocumentLocator service HintPath dependencies in root packages
+            # ------------------------------------------------------------
+
+            ".\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll",
+
+            ".\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll",
+
+            ".\packages\System.IO.Pipelines.10.0.5\lib\net462\System.IO.Pipelines.dll",
+
+            ".\packages\System.Memory.4.6.3\lib\net462\System.Memory.dll",
+
+            ".\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll",
+
+            ".\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll",
+
+            ".\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll",
+
+            ".\packages\System.Text.Json.8.0.6\lib\net462\System.Text.Json.dll",
+
+            ".\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll"
           )
 
           foreach ($file in $requiredFiles) {
