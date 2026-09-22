@@ -21,7 +21,6 @@ jobs:
       # ============================================================
       # 1. Checkout fork
       # ============================================================
-
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
@@ -30,9 +29,8 @@ jobs:
 
 
       # ============================================================
-      # 2. Configure upstream and determine latest release
+      # 2. Configure upstream remote and determine latest release
       # ============================================================
-
       - name: Configure upstream remote
         shell: pwsh
         env:
@@ -44,9 +42,8 @@ jobs:
           Write-Host "Configuring upstream repository"
           Write-Host "========================================"
 
+          git remote remove upstream 2>$null
           git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
-
-          Write-Host "Checking latest upstream release..."
 
           $release = Invoke-RestMethod `
             -Uri "https://api.github.com/repos/KleiKodesh/KleiKodeshProject/releases/latest" `
@@ -56,36 +53,34 @@ jobs:
               "Accept" = "application/vnd.github+json"
             }
 
+          if (-not $release.tag_name) {
+            throw "Could not determine latest upstream release."
+          }
+
           if ($release.tag_name -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid upstream release tag: $($release.tag_name)"
           }
 
-          Write-Host ""
-          Write-Host "Latest upstream release:"
-          Write-Host $release.tag_name
-
-          "UPSTREAM_RELEASE=$($release.tag_name)" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Encoding utf8
+          $version = $release.tag_name
 
           Write-Host ""
-          Write-Host "Fetching upstream release tag..."
+          Write-Host "Latest upstream release: $version"
+          Write-Host ""
+
+          "UPSTREAM_RELEASE=$version" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           git fetch upstream `
-            "refs/tags/$($release.tag_name):refs/tags/upstream-release"
+            "refs/tags/$version:refs/tags/upstream-release"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to fetch upstream release tag."
+            throw "Failed to fetch upstream release $version."
           }
-
-          Write-Host "[OK] Upstream release fetched."
 
 
       # ============================================================
       # 3. Merge upstream release into fork
       # ============================================================
-
       - name: Merge upstream changes
         shell: pwsh
         run: |
@@ -98,68 +93,109 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          Write-Host "Merging upstream release $env:UPSTREAM_RELEASE..."
-
           git merge --no-edit upstream-release
 
           if ($LASTEXITCODE -ne 0) {
+            Write-Host "Merge failed. Aborting merge."
             git merge --abort
-
-            Write-Host ""
-            Write-Host "Merge conflict detected." -ForegroundColor Red
-            Write-Host "The release will not be built." -ForegroundColor Red
-
             exit 1
           }
-
-          Write-Host "[OK] Upstream merge completed."
-
-          Write-Host ""
-          Write-Host "Pushing merged master to fork..."
 
           git push origin HEAD:master
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to push merged master to origin."
+            throw "Failed to push merged master branch."
           }
 
-          Write-Host "[OK] Fork master updated."
-
 
       # ============================================================
-      # 4. Initialize and update submodules
+      # 4. Clone external ChromeTabs dependency
+      #
+      # The main repository references:
+      #
+      #   ChromeTabs/FluentChromeTabs/FluentChromeTabs.csproj
+      #
+      # but ChromeTabs is NOT tracked as a submodule.
+      #
+      # The original external repository is:
+      #
+      #   KleiKodesh/EasyTabs
+      #
+      # It is locally expected under the name ChromeTabs.
       # ============================================================
-
-      - name: Initialize submodules (latest remote HEAD)
+      - name: Clone external ChromeTabs dependency
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "========================================"
-          Write-Host "Synchronizing submodules"
+          Write-Host "Cloning ChromeTabs dependency"
+          Write-Host "========================================"
+
+          $chromeTabsPath = ".\ChromeTabs"
+
+          if (Test-Path $chromeTabsPath) {
+            Write-Host "Removing existing ChromeTabs directory..."
+            Remove-Item `
+              -Recurse `
+              -Force `
+              $chromeTabsPath
+          }
+
+          git clone `
+            --depth 1 `
+            https://github.com/KleiKodesh/EasyTabs.git `
+            $chromeTabsPath
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to clone KleiKodesh/EasyTabs."
+          }
+
+          $chromeTabsProject =
+            ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj"
+
+          if (-not (Test-Path $chromeTabsProject)) {
+            throw "FluentChromeTabs project was not found: $chromeTabsProject"
+          }
+
+          Write-Host ""
+          Write-Host "[OK] ChromeTabs repository cloned."
+          Write-Host "[OK] FluentChromeTabs.csproj found."
+          Write-Host $chromeTabsProject
+          Write-Host ""
+
+
+      # ============================================================
+      # 5. Initialize Git submodules
+      # ============================================================
+      - name: Initialize submodules
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Initializing submodules"
           Write-Host "========================================"
 
           git submodule sync --recursive
 
           if ($LASTEXITCODE -ne 0) {
-            throw "git submodule sync failed with exit code $LASTEXITCODE"
+            throw "git submodule sync failed."
           }
-
-          Write-Host "Updating submodules to latest remote commits..."
 
           git submodule update --init --recursive --remote
 
           if ($LASTEXITCODE -ne 0) {
-            throw "git submodule update failed with exit code $LASTEXITCODE"
+            throw "git submodule update failed."
           }
 
-          Write-Host "[OK] Submodules initialized and updated."
+          Write-Host ""
+          Write-Host "[OK] Submodules initialized."
 
 
       # ============================================================
-      # 5. Install NSIS
+      # 6. Install NSIS
       # ============================================================
-
       - name: Install NSIS
         shell: pwsh
         run: |
@@ -175,13 +211,10 @@ jobs:
             throw "NSIS installation failed."
           }
 
-          Write-Host "[OK] NSIS installed."
-
 
       # ============================================================
-      # 6. Locate MSBuild
+      # 7. Locate MSBuild
       # ============================================================
-
       - name: Locate MSBuild
         shell: pwsh
         run: |
@@ -191,13 +224,12 @@ jobs:
           Write-Host "Locating MSBuild"
           Write-Host "========================================"
 
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vswhere =
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
           if (-not (Test-Path $vswhere)) {
-            throw "vswhere.exe was not found at: $vswhere"
+            throw "vswhere.exe was not found: $vswhere"
           }
-
-          Write-Host "Searching for MSBuild with vswhere..."
 
           $msbuild = & $vswhere `
             -latest `
@@ -212,27 +244,16 @@ jobs:
 
           $msbuild = $msbuild.Trim()
 
-          if (-not (Test-Path $msbuild)) {
-            throw "vswhere returned an invalid MSBuild path: $msbuild"
-          }
-
-          Write-Host ""
-          Write-Host "MSBuild found:"
+          Write-Host "MSBuild:"
           Write-Host $msbuild
 
           "MSBUILD_PATH=$msbuild" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
-
-          Write-Host "[OK] MSBuild configured."
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
 
       # ============================================================
-      # 7. Install NuGet CLI
+      # 8. Install NuGet CLI
       # ============================================================
-
       - name: Install NuGet CLI
         shell: pwsh
         run: |
@@ -248,68 +269,49 @@ jobs:
             throw "NuGet CLI installation failed."
           }
 
-          $nuget = Get-Command nuget.exe -ErrorAction SilentlyContinue
-
-          if (-not $nuget) {
+          if (-not (Get-Command nuget.exe -ErrorAction SilentlyContinue)) {
             throw "NuGet CLI was not found after installation."
           }
 
           Write-Host ""
-          Write-Host "NuGet found at:"
-          Write-Host $nuget.Source
-
-          Write-Host "[OK] NuGet CLI installed."
+          Write-Host "[OK] NuGet CLI available."
 
 
       # ============================================================
-      # 8. Restore all NuGet packages
+      # 9. Restore NuGet packages
       # ============================================================
-
       - name: Restore NuGet packages
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "========================================"
+          Write-Host "Restoring NuGet packages"
+          Write-Host "========================================"
+
+
           # --------------------------------------------------------
-          # SDK-style WpfLib
+          # SDK-style projects
           # --------------------------------------------------------
 
           Write-Host ""
-          Write-Host "========================================"
-          Write-Host "Restoring SDK-style projects"
-          Write-Host "========================================"
-
+          Write-Host "Restoring WpfLib..."
+          
           & $env:MSBUILD_PATH `
             "WpfLib\WpfLib.csproj" `
             /t:Restore `
             /p:Configuration=Release
 
           if ($LASTEXITCODE -ne 0) {
-            throw "MSBuild restore failed for WpfLib.csproj with exit code $LASTEXITCODE"
+            throw "WpfLib restore failed."
           }
 
-          if (-not (Test-Path ".\WpfLib\obj\project.assets.json")) {
-            throw "WpfLib restore did not create project.assets.json"
-          }
-
-          Write-Host "[OK] WpfLib restore"
-
-
-          # --------------------------------------------------------
-          # DocumentLocator SDK project
-          # --------------------------------------------------------
 
           Write-Host ""
-          Write-Host "========================================"
-          Write-Host "Restoring DocumentLocator SDK project"
-          Write-Host "========================================"
+          Write-Host "Restoring DocumentLocator..."
 
-          $documentLocatorProject = `
+          $documentLocatorProject =
             "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\DocumentLocator.csproj"
-
-          if (-not (Test-Path $documentLocatorProject)) {
-            throw "DocumentLocator project not found: $documentLocatorProject"
-          }
 
           & $env:MSBUILD_PATH `
             $documentLocatorProject `
@@ -318,94 +320,94 @@ jobs:
             /p:Platform=AnyCPU
 
           if ($LASTEXITCODE -ne 0) {
-            throw "MSBuild restore failed for DocumentLocator.csproj with exit code $LASTEXITCODE"
+            throw "DocumentLocator restore failed."
           }
-
-          $documentLocatorAssets = `
-            "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json"
-
-          if (-not (Test-Path $documentLocatorAssets)) {
-            throw "DocumentLocator restore did not create project.assets.json"
-          }
-
-          Write-Host "[OK] DocumentLocator SDK project restore"
 
 
           # --------------------------------------------------------
           # Legacy packages.config projects
           # --------------------------------------------------------
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "Restoring legacy packages.config projects"
-          Write-Host "========================================"
-
           $legacyRestores = @(
+
             @{
-              Config = "KleiKodeshVsto\packages.config"
+              Config   = "KleiKodeshVsto\packages.config"
               Packages = ".\packages"
             },
+
             @{
-              Config = "UpdateCheckerLib\packages.config"
+              Config   = "UpdateCheckerLib\packages.config"
               Packages = ".\packages"
             },
+
             @{
-              Config = "KleiKodeshVsto\WebSitesLib\WebSitesLib\packages.config"
+              Config   = "KleiKodeshVsto\WebSitesLib\WebSitesLib\packages.config"
               Packages = ".\KleiKodeshVsto\WebSitesLib\packages"
             },
+
             @{
-              Config = "KleiKodeshVsto\nakdan\Nakdan\packages.config"
+              Config   = "KleiKodeshVsto\nakdan\Nakdan\packages.config"
               Packages = ".\KleiKodeshVsto\nakdan\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\KitveiHakodeshLib\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\KitveiHakodeshLib\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\KitveiHakodeshDemoApp\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\KitveiHakodeshDemoApp\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLib.Net48\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLib.Net48\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLibTest\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLibTest\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
             },
+
             @{
-              Config = "KleiKodeshVsto\DocDesign\DocDesignLib\packages.config"
+              Config   = "KleiKodeshVsto\DocDesign\DocDesignLib\packages.config"
               Packages = ".\KleiKodeshVsto\DocDesign\DocDesignLib\packages"
             },
+
             @{
-              Config = "KleiKodeshVsto\Kiwix\KiwixLib\packages.config"
+              Config   = "KleiKodeshVsto\Kiwix\KiwixLib\packages.config"
               Packages = ".\packages"
             },
+
             @{
-              Config = "KleiKodeshVsto\RegexInWord\RegexFindLib\packages.config"
-              Packages = ".\KleiKodeshVsto\RegexInWord\RegexFindLib\packages"
+              Config   = "KleiKodeshVsto\RegexInWord\RegexFindLib\packages.config"
+              Packages = ".\KleiKodeshVsto\RegexInWord\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
             },
+
             @{
-              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
+              Config   = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
               Packages = ".\packages"
             }
+
           )
+
 
           foreach ($restore in $legacyRestores) {
 
             Write-Host ""
-            Write-Host "----------------------------------------"
-            Write-Host "Config:   $($restore.Config)"
-            Write-Host "Packages: $($restore.Packages)"
-            Write-Host "----------------------------------------"
+            Write-Host "Restoring:"
+            Write-Host $restore.Config
 
             if (-not (Test-Path $restore.Config)) {
               throw "packages.config not found: $($restore.Config)"
@@ -424,32 +426,23 @@ jobs:
               -Verbosity normal
 
             if ($LASTEXITCODE -ne 0) {
-              throw "NuGet restore failed for $($restore.Config) into $($restore.Packages) with exit code $LASTEXITCODE"
+              throw "NuGet restore failed for $($restore.Config)"
             }
-
-            Write-Host "[OK] $($restore.Config) -> $($restore.Packages)"
           }
 
 
-          # ========================================================
-          # FIX:
-          # Explicitly install System.ValueTuple 4.5.0
+          # --------------------------------------------------------
+          # Explicit legacy dependencies
           #
-          # DocumentLocator.Service expects this exact legacy DLL:
+          # DocumentLocator.Service references this exact DLL:
           #
-          # packages\System.ValueTuple.4.5.0\lib\net47\
-          #     System.ValueTuple.dll
-          #
-          # The current packages.config restore does not reliably
-          # produce this package, so install it explicitly.
-          # ========================================================
+          # System.ValueTuple 4.5.0
+          # --------------------------------------------------------
 
           Write-Host ""
-          Write-Host "========================================"
-          Write-Host "Installing legacy DocumentLocator System.ValueTuple 4.5.0"
-          Write-Host "========================================"
+          Write-Host "Installing explicit System.ValueTuple 4.5.0..."
 
-          $documentLocatorPackages = `
+          $documentLocatorPackages =
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
 
           New-Item `
@@ -466,29 +459,26 @@ jobs:
             -Verbosity normal
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install System.ValueTuple 4.5.0"
+            throw "Failed to install System.ValueTuple 4.5.0."
           }
 
-          $legacyValueTuple = `
+
+          $legacyValueTuple =
             "$documentLocatorPackages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll"
 
           if (-not (Test-Path $legacyValueTuple)) {
             throw "System.ValueTuple 4.5.0 DLL was not installed: $legacyValueTuple"
           }
 
-          Write-Host ""
-          Write-Host "[OK] System.ValueTuple 4.5.0"
-          Write-Host $legacyValueTuple
+          Write-Host "[OK] System.ValueTuple.dll found."
 
 
-          # ========================================================
-          # Legacy Unsafe dependency
-          # ========================================================
+          # --------------------------------------------------------
+          # Explicit System.Runtime.CompilerServices.Unsafe
+          # --------------------------------------------------------
 
           Write-Host ""
-          Write-Host "========================================"
-          Write-Host "Installing legacy DocumentLocator dependency"
-          Write-Host "========================================"
+          Write-Host "Installing explicit System.Runtime.CompilerServices.Unsafe 4.3.0..."
 
           & nuget.exe install `
             "System.Runtime.CompilerServices.Unsafe" `
@@ -498,162 +488,64 @@ jobs:
             -Verbosity normal
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install System.Runtime.CompilerServices.Unsafe 4.3.0"
+            throw "Failed to install System.Runtime.CompilerServices.Unsafe 4.3.0."
           }
 
-          $legacyUnsafe = `
-            "$documentLocatorPackages\System.Runtime.CompilerServices.Unsafe.4.3.0\lib\netstandard1.0\System.Runtime.CompilerServices.Unsafe.dll"
-
-          if (-not (Test-Path $legacyUnsafe)) {
-            throw "Legacy Unsafe DLL was not installed: $legacyUnsafe"
-          }
-
-          Write-Host "[OK] System.Runtime.CompilerServices.Unsafe 4.3.0"
-
-
-          # ========================================================
-          # Verify required package files
-          # ========================================================
 
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "Verifying required package files"
+          Write-Host "NuGet restore completed successfully"
           Write-Host "========================================"
+
+
+      # ============================================================
+      # 10. Verify external dependency and important restored files
+      # ============================================================
+      - name: Verify build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Verifying build dependencies"
+          Write-Host "========================================"
+
 
           $requiredFiles = @(
 
-            # ------------------------------------------------------
-            # Main solution packages
-            # ------------------------------------------------------
+            # External ChromeTabs dependency
+            ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj",
 
-            ".\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
-            ".\packages\Microsoft.Web.WebView2.1.0.3912.50\build\Microsoft.Web.WebView2.targets",
-            ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
-
-            # ------------------------------------------------------
-            # WebSitesLib
-            # ------------------------------------------------------
-
-            ".\KleiKodeshVsto\WebSitesLib\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
-
-            # ------------------------------------------------------
-            # Nakdan
-            # ------------------------------------------------------
-
-            ".\KleiKodeshVsto\nakdan\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets",
-
-            # ------------------------------------------------------
-            # KitveiHakodesh
-            # ------------------------------------------------------
-
-            ".\KitveiHakodesh\CSharpBackend\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
-
-            ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
-
-            # ------------------------------------------------------
-            # WpfLib
-            # ------------------------------------------------------
-
-            ".\WpfLib\obj\project.assets.json",
-
-            # ------------------------------------------------------
-            # DocumentLocator SDK restore
-            # ------------------------------------------------------
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json",
-
-            # ------------------------------------------------------
-            # DocumentLocator packages
-            # ------------------------------------------------------
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\J2N.2.0.0\lib\net45\J2N.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Lucene.Net.4.8.0-beta00016\lib\net45\Lucene.Net.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Memory.4.6.3\lib\net462\System.Memory.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Text.Json.8.0.6\lib\net462\System.Text.Json.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
-
-            # ------------------------------------------------------
-            # IMPORTANT:
-            # Legacy System.ValueTuple 4.5.0 required by the
-            # DocumentLocator.Service build.
-            # ------------------------------------------------------
-
+            # DocumentLocator legacy dependency
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll",
 
-            # ------------------------------------------------------
-            # Legacy Unsafe
-            # ------------------------------------------------------
+            # Existing package directories/files
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages",
+            ".\KitveiHakodesh\CSharpBackend\packages",
+            ".\packages"
 
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Runtime.CompilerServices.Unsafe.4.3.0\lib\netstandard1.0\System.Runtime.CompilerServices.Unsafe.dll",
-
-            # ------------------------------------------------------
-            # Other DocumentLocator dependencies
-            # ------------------------------------------------------
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Prism.Core.7.2.0.1422\lib\net45\Prism.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Configuration.Abstractions.1.1.2\lib\netstandard1.0\Microsoft.Extensions.Configuration.Abstractions.dll",
-
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Primitives.1.1.1\lib\netstandard1.0\Microsoft.Extensions.Primitives.dll",
-
-            # ------------------------------------------------------
-            # Main packages - modern dependencies
-            # ------------------------------------------------------
-
-            ".\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll",
-
-            ".\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll",
-
-            ".\packages\System.IO.Pipelines.10.0.5\lib\net462\System.IO.Pipelines.dll",
-
-            ".\packages\System.Memory.4.6.3\lib\net462\System.Memory.dll",
-
-            ".\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll",
-
-            ".\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll",
-
-            ".\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll",
-
-            ".\packages\System.Text.Json.10.0.5\lib\net462\System.Text.Json.dll",
-
-            ".\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll"
           )
+
 
           foreach ($file in $requiredFiles) {
 
             if (-not (Test-Path $file)) {
-              throw "Required restored file is missing: $file"
+              throw "Required build dependency is missing: $file"
             }
 
             Write-Host "[OK] $file"
           }
 
+
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "NuGet restore completed successfully."
+          Write-Host "Dependency verification completed"
           Write-Host "========================================"
 
 
       # ============================================================
-      # 9. Build installer
+      # 11. Build installer
       # ============================================================
-
       - name: Build installer
         shell: pwsh
         run: |
@@ -673,26 +565,25 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "[OK] Installer build completed."
+          Write-Host "========================================"
+          Write-Host "Installer build completed"
+          Write-Host "========================================"
 
 
       # ============================================================
-      # 10. Publish GitHub release
+      # 12. Verify release assets
       # ============================================================
-
-      - name: Publish fork release
+      - name: Verify release assets
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "========================================"
+          Write-Host "Verifying release assets"
+          Write-Host "========================================"
+
           $version = $env:UPSTREAM_RELEASE
           $releaseDir = "Build/releases"
-
-          Write-Host "========================================"
-          Write-Host "Preparing release $version"
-          Write-Host "========================================"
 
           $assets = @(
             "$releaseDir/KleiKodeshSetup-$version.exe",
@@ -701,31 +592,65 @@ jobs:
             "$releaseDir/KitveiHakodeshPortable-$version.zip"
           )
 
+
           foreach ($asset in $assets) {
 
             if (-not (Test-Path $asset)) {
               throw "Missing release asset: $asset"
             }
 
-            Write-Host "[OK] Found asset: $asset"
+            $size = (Get-Item $asset).Length
+
+            Write-Host "[OK] $asset"
+            Write-Host "     Size: $size bytes"
           }
+
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "All release assets verified"
+          Write-Host "========================================"
+
+
+      # ============================================================
+      # 13. Publish GitHub release
+      # ============================================================
+      - name: Publish fork release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Publishing GitHub release"
+          Write-Host "========================================"
+
+          $version = $env:UPSTREAM_RELEASE
+          $releaseDir = "Build/releases"
+
+          $assets = @(
+            "$releaseDir/KleiKodeshSetup-$version.exe",
+            "$releaseDir/KleiKodeshSetup-$version-x64.exe",
+            "$releaseDir/KleiKodeshSetup-$version-x86.exe",
+            "$releaseDir/KitveiHakodeshPortable-$version.zip"
+          )
 
 
           # --------------------------------------------------------
           # Check whether release already exists
           # --------------------------------------------------------
 
-          Write-Host ""
-          Write-Host "Checking whether release $version already exists..."
-
           gh release view `
             $version `
             --repo "${{ github.repository }}"
 
+
           if ($LASTEXITCODE -eq 0) {
 
             Write-Host ""
-            Write-Host "Existing release found. Deleting it..."
+            Write-Host "Release $version already exists."
+            Write-Host "Deleting existing release and tag..."
 
             gh release delete `
               $version `
@@ -734,22 +659,14 @@ jobs:
               --cleanup-tag
 
             if ($LASTEXITCODE -ne 0) {
-              throw "Failed to delete existing release $version"
+              throw "Failed to delete existing release $version."
             }
-
-          }
-          else {
-
-            Write-Host "No existing release found."
           }
 
 
           # --------------------------------------------------------
           # Create release
           # --------------------------------------------------------
-
-          Write-Host ""
-          Write-Host "Creating release $version..."
 
           gh release create `
             $version `
@@ -760,10 +677,11 @@ jobs:
             --target master
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to create GitHub release $version"
+            throw "Failed to create GitHub release $version."
           }
+
 
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "Release $version published successfully."
+          Write-Host "Release $version published successfully"
           Write-Host "========================================"
