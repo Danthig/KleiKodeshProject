@@ -17,11 +17,21 @@ jobs:
     runs-on: windows-latest
 
     steps:
+
+      # ============================================================
+      # 1. Checkout fork
+      # ============================================================
+
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
+
+
+      # ============================================================
+      # 2. Configure upstream and determine latest release
+      # ============================================================
 
       - name: Configure upstream remote
         shell: pwsh
@@ -29,6 +39,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Configuring upstream repository"
+          Write-Host "========================================"
 
           git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
 
@@ -46,13 +60,16 @@ jobs:
             throw "Invalid upstream release tag: $($release.tag_name)"
           }
 
-          Write-Host "Latest upstream release: $($release.tag_name)"
+          Write-Host ""
+          Write-Host "Latest upstream release:"
+          Write-Host $release.tag_name
 
           "UPSTREAM_RELEASE=$($release.tag_name)" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
               -Encoding utf8
 
+          Write-Host ""
           Write-Host "Fetching upstream release tag..."
 
           git fetch upstream `
@@ -64,10 +81,19 @@ jobs:
 
           Write-Host "[OK] Upstream release fetched."
 
+
+      # ============================================================
+      # 3. Merge upstream release into fork
+      # ============================================================
+
       - name: Merge upstream changes
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Merging upstream release"
+          Write-Host "========================================"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -78,12 +104,17 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
             git merge --abort
-            Write-Host "Merge conflict detected. The release will not be built." -ForegroundColor Red
+
+            Write-Host ""
+            Write-Host "Merge conflict detected." -ForegroundColor Red
+            Write-Host "The release will not be built." -ForegroundColor Red
+
             exit 1
           }
 
           Write-Host "[OK] Upstream merge completed."
 
+          Write-Host ""
           Write-Host "Pushing merged master to fork..."
 
           git push origin HEAD:master
@@ -94,12 +125,19 @@ jobs:
 
           Write-Host "[OK] Fork master updated."
 
+
+      # ============================================================
+      # 4. Initialize and update submodules
+      # ============================================================
+
       - name: Initialize submodules (latest remote HEAD)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Synchronizing submodules..."
+          Write-Host "========================================"
+          Write-Host "Synchronizing submodules"
+          Write-Host "========================================"
 
           git submodule sync --recursive
 
@@ -117,12 +155,19 @@ jobs:
 
           Write-Host "[OK] Submodules initialized and updated."
 
+
+      # ============================================================
+      # 5. Install NSIS
+      # ============================================================
+
       - name: Install NSIS
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Installing NSIS..."
+          Write-Host "========================================"
+          Write-Host "Installing NSIS"
+          Write-Host "========================================"
 
           choco install nsis -y --no-progress
 
@@ -132,10 +177,19 @@ jobs:
 
           Write-Host "[OK] NSIS installed."
 
+
+      # ============================================================
+      # 6. Locate MSBuild
+      # ============================================================
+
       - name: Locate MSBuild
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Locating MSBuild"
+          Write-Host "========================================"
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
@@ -162,6 +216,7 @@ jobs:
             throw "vswhere returned an invalid MSBuild path: $msbuild"
           }
 
+          Write-Host ""
           Write-Host "MSBuild found:"
           Write-Host $msbuild
 
@@ -173,12 +228,19 @@ jobs:
 
           Write-Host "[OK] MSBuild configured."
 
+
+      # ============================================================
+      # 7. Install NuGet CLI
+      # ============================================================
+
       - name: Install NuGet CLI
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Installing NuGet CLI..."
+          Write-Host "========================================"
+          Write-Host "Installing NuGet CLI"
+          Write-Host "========================================"
 
           choco install nuget.commandline -y --no-progress
 
@@ -192,16 +254,27 @@ jobs:
             throw "NuGet CLI was not found after installation."
           }
 
+          Write-Host ""
           Write-Host "NuGet found at:"
           Write-Host $nuget.Source
 
           Write-Host "[OK] NuGet CLI installed."
+
+
+      # ============================================================
+      # 8. Restore all NuGet packages
+      # ============================================================
 
       - name: Restore NuGet packages
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
+          # --------------------------------------------------------
+          # SDK-style WpfLib
+          # --------------------------------------------------------
+
+          Write-Host ""
           Write-Host "========================================"
           Write-Host "Restoring SDK-style projects"
           Write-Host "========================================"
@@ -220,6 +293,11 @@ jobs:
           }
 
           Write-Host "[OK] WpfLib restore"
+
+
+          # --------------------------------------------------------
+          # DocumentLocator SDK project
+          # --------------------------------------------------------
 
           Write-Host ""
           Write-Host "========================================"
@@ -251,6 +329,11 @@ jobs:
           }
 
           Write-Host "[OK] DocumentLocator SDK project restore"
+
+
+          # --------------------------------------------------------
+          # Legacy packages.config projects
+          # --------------------------------------------------------
 
           Write-Host ""
           Write-Host "========================================"
@@ -317,6 +400,7 @@ jobs:
           )
 
           foreach ($restore in $legacyRestores) {
+
             Write-Host ""
             Write-Host "----------------------------------------"
             Write-Host "Config:   $($restore.Config)"
@@ -346,9 +430,23 @@ jobs:
             Write-Host "[OK] $($restore.Config) -> $($restore.Packages)"
           }
 
+
+          # ========================================================
+          # FIX:
+          # Explicitly install System.ValueTuple 4.5.0
+          #
+          # DocumentLocator.Service expects this exact legacy DLL:
+          #
+          # packages\System.ValueTuple.4.5.0\lib\net47\
+          #     System.ValueTuple.dll
+          #
+          # The current packages.config restore does not reliably
+          # produce this package, so install it explicitly.
+          # ========================================================
+
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "Installing legacy DocumentLocator dependency"
+          Write-Host "Installing legacy DocumentLocator System.ValueTuple 4.5.0"
           Write-Host "========================================"
 
           $documentLocatorPackages = `
@@ -359,6 +457,38 @@ jobs:
             -Force `
             -Path $documentLocatorPackages |
             Out-Null
+
+          & nuget.exe install `
+            "System.ValueTuple" `
+            -Version "4.5.0" `
+            -OutputDirectory $documentLocatorPackages `
+            -NonInteractive `
+            -Verbosity normal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install System.ValueTuple 4.5.0"
+          }
+
+          $legacyValueTuple = `
+            "$documentLocatorPackages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll"
+
+          if (-not (Test-Path $legacyValueTuple)) {
+            throw "System.ValueTuple 4.5.0 DLL was not installed: $legacyValueTuple"
+          }
+
+          Write-Host ""
+          Write-Host "[OK] System.ValueTuple 4.5.0"
+          Write-Host $legacyValueTuple
+
+
+          # ========================================================
+          # Legacy Unsafe dependency
+          # ========================================================
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "Installing legacy DocumentLocator dependency"
+          Write-Host "========================================"
 
           & nuget.exe install `
             "System.Runtime.CompilerServices.Unsafe" `
@@ -380,55 +510,133 @@ jobs:
 
           Write-Host "[OK] System.Runtime.CompilerServices.Unsafe 4.3.0"
 
+
+          # ========================================================
+          # Verify required package files
+          # ========================================================
+
           Write-Host ""
           Write-Host "========================================"
           Write-Host "Verifying required package files"
           Write-Host "========================================"
 
           $requiredFiles = @(
+
+            # ------------------------------------------------------
+            # Main solution packages
+            # ------------------------------------------------------
+
             ".\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
             ".\packages\Microsoft.Web.WebView2.1.0.3912.50\build\Microsoft.Web.WebView2.targets",
             ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
 
+            # ------------------------------------------------------
+            # WebSitesLib
+            # ------------------------------------------------------
+
             ".\KleiKodeshVsto\WebSitesLib\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
+            # ------------------------------------------------------
+            # Nakdan
+            # ------------------------------------------------------
+
             ".\KleiKodeshVsto\nakdan\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets",
+
+            # ------------------------------------------------------
+            # KitveiHakodesh
+            # ------------------------------------------------------
+
             ".\KitveiHakodesh\CSharpBackend\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
             ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
+
+            # ------------------------------------------------------
+            # WpfLib
+            # ------------------------------------------------------
 
             ".\WpfLib\obj\project.assets.json",
 
+            # ------------------------------------------------------
+            # DocumentLocator SDK restore
+            # ------------------------------------------------------
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json",
 
+            # ------------------------------------------------------
+            # DocumentLocator packages
+            # ------------------------------------------------------
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\J2N.2.0.0\lib\net45\J2N.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Lucene.Net.4.8.0-beta00016\lib\net45\Lucene.Net.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Memory.4.6.3\lib\net462\System.Memory.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Text.Json.8.0.6\lib\net462\System.Text.Json.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
+            # ------------------------------------------------------
+            # IMPORTANT:
+            # Legacy System.ValueTuple 4.5.0 required by the
+            # DocumentLocator.Service build.
+            # ------------------------------------------------------
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll",
+
+            # ------------------------------------------------------
+            # Legacy Unsafe
+            # ------------------------------------------------------
 
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Runtime.CompilerServices.Unsafe.4.3.0\lib\netstandard1.0\System.Runtime.CompilerServices.Unsafe.dll",
 
+            # ------------------------------------------------------
+            # Other DocumentLocator dependencies
+            # ------------------------------------------------------
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Prism.Core.7.2.0.1422\lib\net45\Prism.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Configuration.Abstractions.1.1.2\lib\netstandard1.0\Microsoft.Extensions.Configuration.Abstractions.dll",
+
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Primitives.1.1.1\lib\netstandard1.0\Microsoft.Extensions.Primitives.dll",
 
+            # ------------------------------------------------------
+            # Main packages - modern dependencies
+            # ------------------------------------------------------
+
             ".\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll",
+
             ".\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll",
+
             ".\packages\System.IO.Pipelines.10.0.5\lib\net462\System.IO.Pipelines.dll",
+
             ".\packages\System.Memory.4.6.3\lib\net462\System.Memory.dll",
+
             ".\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll",
+
             ".\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll",
+
             ".\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll",
-            ".\packages\System.Text.Json.8.0.6\lib\net462\System.Text.Json.dll",
+
+            ".\packages\System.Text.Json.10.0.5\lib\net462\System.Text.Json.dll",
+
             ".\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll"
           )
 
           foreach ($file in $requiredFiles) {
+
             if (-not (Test-Path $file)) {
               throw "Required restored file is missing: $file"
             }
@@ -440,6 +648,11 @@ jobs:
           Write-Host "========================================"
           Write-Host "NuGet restore completed successfully."
           Write-Host "========================================"
+
+
+      # ============================================================
+      # 9. Build installer
+      # ============================================================
 
       - name: Build installer
         shell: pwsh
@@ -459,7 +672,13 @@ jobs:
             throw "Installer build failed with exit code $LASTEXITCODE"
           }
 
+          Write-Host ""
           Write-Host "[OK] Installer build completed."
+
+
+      # ============================================================
+      # 10. Publish GitHub release
+      # ============================================================
 
       - name: Publish fork release
         shell: pwsh
@@ -483,12 +702,18 @@ jobs:
           )
 
           foreach ($asset in $assets) {
+
             if (-not (Test-Path $asset)) {
               throw "Missing release asset: $asset"
             }
 
             Write-Host "[OK] Found asset: $asset"
           }
+
+
+          # --------------------------------------------------------
+          # Check whether release already exists
+          # --------------------------------------------------------
 
           Write-Host ""
           Write-Host "Checking whether release $version already exists..."
@@ -498,6 +723,8 @@ jobs:
             --repo "${{ github.repository }}"
 
           if ($LASTEXITCODE -eq 0) {
+
+            Write-Host ""
             Write-Host "Existing release found. Deleting it..."
 
             gh release delete `
@@ -509,10 +736,17 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Failed to delete existing release $version"
             }
+
           }
           else {
+
             Write-Host "No existing release found."
           }
+
+
+          # --------------------------------------------------------
+          # Create release
+          # --------------------------------------------------------
 
           Write-Host ""
           Write-Host "Creating release $version..."
