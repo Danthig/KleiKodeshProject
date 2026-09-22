@@ -21,6 +21,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+          submodules: recursive
 
       - name: Configure upstream remote
         shell: pwsh
