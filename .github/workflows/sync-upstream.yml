@@ -96,10 +96,22 @@ jobs:
       - name: Restore NuGet packages
         shell: pwsh
         run: |
-          Write-Host "Restoring packages for KleiKodeshProject.slnx using MSBuild..."
-          & $env:MSBUILD_PATH "KleiKodeshProject.slnx" /t:restore /p:Configuration=Release
-          if ($LASTEXITCODE -ne 0) {
-            throw "MSBuild restore failed with exit code $LASTEXITCODE"
+          # Restoring the whole .slnx pulls in every project listed there, including
+          # ones unrelated to the installer build (e.g. ChromeTabs/FluentChromeTabs,
+          # which is missing from the checked-out tree entirely -- an upstream repo
+          # issue, not something restore can work around). build-installer.ps1 only
+          # ever builds KleiKodeshVsto.csproj (via KleiKodeshVstoInstallerWpf.csproj's
+          # own BuildVstoAndPack target), so only those two are restored here.
+          $projects = @(
+            "KleiKodeshVsto\KleiKodeshVsto.csproj",
+            "Build\Installer\KleiKodeshVstoInstallerWpf.csproj"
+          )
+          foreach ($project in $projects) {
+            Write-Host "Restoring $project ..."
+            & $env:MSBUILD_PATH $project /t:restore /p:Configuration=Release
+            if ($LASTEXITCODE -ne 0) {
+              throw "MSBuild restore failed for $project with exit code $LASTEXITCODE"
+            }
           }
 
       - name: Build installer
