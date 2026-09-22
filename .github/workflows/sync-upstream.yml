@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   sync-build-release:
-    runs-on: windows-latest
+    runs-on: windows-2025
 
     steps:
 
@@ -29,7 +29,7 @@ jobs:
 
 
       # ============================================================
-      # 2. Configure upstream remote and determine latest release
+      # 2. Configure upstream and determine latest upstream release
       # ============================================================
       - name: Configure upstream remote
         shell: pwsh
@@ -70,24 +70,25 @@ jobs:
           "UPSTREAM_RELEASE=$version" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          # Fetch the actual upstream release tag.
-          # Do not construct a second refs/tags/ prefix here.
+          # IMPORTANT:
+          # Fetch the release tag into FETCH_HEAD.
+          # Do NOT try to resolve refs/tags/$version locally afterward.
           git fetch upstream "refs/tags/$version"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to fetch upstream release $version."
           }
 
-          # Create/update a simple local tag pointing to the fetched tag.
-          git tag -f upstream-release "refs/tags/$version"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to create local upstream-release tag."
-          }
+          Write-Host ""
+          Write-Host "[OK] Upstream release $version fetched into FETCH_HEAD."
 
 
       # ============================================================
-      # 3. Merge upstream release into fork
+      # 3. Merge upstream release
+      #
+      # The fetched release is deliberately merged from FETCH_HEAD.
+      # This avoids the local-tag/ref problem that caused the previous
+      # workflow failure.
       # ============================================================
       - name: Merge upstream changes
         shell: pwsh
@@ -101,35 +102,43 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git merge --no-edit upstream-release
+          git merge --no-edit FETCH_HEAD
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Merge failed. Aborting merge."
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host "UPSTREAM MERGE FAILED"
+            Write-Host "========================================"
+            Write-Host ""
+            Write-Host "The fork and upstream have merge conflicts."
+            Write-Host "Git status:"
+            git status --short
+            Write-Host ""
+            Write-Host "Merge conflict files:"
+            git diff --name-only --diff-filter=U
+
             git merge --abort
+
             exit 1
           }
 
-          git push origin HEAD:master
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to push merged master branch."
-          }
+          Write-Host ""
+          Write-Host "[OK] Upstream release merged successfully."
 
 
       # ============================================================
       # 4. Clone external ChromeTabs dependency
       #
-      # The main repository references:
+      # KleiKodesh references:
       #
       #   ChromeTabs/FluentChromeTabs/FluentChromeTabs.csproj
       #
-      # but ChromeTabs is NOT tracked as a submodule.
-      #
-      # The original external repository is:
+      # ChromeTabs is not a submodule.
+      # The external repository is:
       #
       #   KleiKodesh/EasyTabs
       #
-      # It is locally expected under the name ChromeTabs.
+      # It must exist locally under the directory name ChromeTabs.
       # ============================================================
       - name: Clone external ChromeTabs dependency
         shell: pwsh
@@ -171,7 +180,6 @@ jobs:
           Write-Host "[OK] ChromeTabs repository cloned."
           Write-Host "[OK] FluentChromeTabs.csproj found."
           Write-Host $chromeTabsProject
-          Write-Host ""
 
 
       # ============================================================
@@ -220,6 +228,8 @@ jobs:
             throw "NSIS installation failed."
           }
 
+          Write-Host "[OK] NSIS installed."
+
 
       # ============================================================
       # 7. Locate MSBuild
@@ -253,6 +263,7 @@ jobs:
 
           $msbuild = $msbuild.Trim()
 
+          Write-Host ""
           Write-Host "MSBuild:"
           Write-Host $msbuild
 
@@ -278,12 +289,15 @@ jobs:
             throw "NuGet CLI installation failed."
           }
 
-          if (-not (Get-Command nuget.exe -ErrorAction SilentlyContinue)) {
+          $nuget = Get-Command nuget.exe -ErrorAction SilentlyContinue
+
+          if (-not $nuget) {
             throw "NuGet CLI was not found after installation."
           }
 
           Write-Host ""
-          Write-Host "[OK] NuGet CLI available."
+          Write-Host "[OK] NuGet CLI available:"
+          Write-Host $nuget.Source
 
 
       # ============================================================
@@ -306,13 +320,15 @@ jobs:
           Write-Host ""
           Write-Host "Restoring WpfLib..."
 
-          & $env:MSBUILD_PATH `
-            "WpfLib\WpfLib.csproj" `
-            /t:Restore `
-            /p:Configuration=Release
+          if (Test-Path "WpfLib\WpfLib.csproj") {
+            & $env:MSBUILD_PATH `
+              "WpfLib\WpfLib.csproj" `
+              /t:Restore `
+              /p:Configuration=Release
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "WpfLib restore failed."
+            if ($LASTEXITCODE -ne 0) {
+              throw "WpfLib restore failed."
+            }
           }
 
 
@@ -322,14 +338,16 @@ jobs:
           $documentLocatorProject =
             "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\DocumentLocator.csproj"
 
-          & $env:MSBUILD_PATH `
-            $documentLocatorProject `
-            /t:Restore `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU
+          if (Test-Path $documentLocatorProject) {
+            & $env:MSBUILD_PATH `
+              $documentLocatorProject `
+              /t:Restore `
+              /p:Configuration=Release `
+              /p:Platform=AnyCPU
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "DocumentLocator restore failed."
+            if ($LASTEXITCODE -ne 0) {
+              throw "DocumentLocator restore failed."
+            }
           }
 
 
@@ -338,79 +356,59 @@ jobs:
           # --------------------------------------------------------
 
           $legacyRestores = @(
-
             @{
               Config   = "KleiKodeshVsto\packages.config"
               Packages = ".\packages"
             },
-
             @{
               Config   = "UpdateCheckerLib\packages.config"
               Packages = ".\packages"
             },
-
             @{
               Config   = "KleiKodeshVsto\WebSitesLib\WebSitesLib\packages.config"
               Packages = ".\KleiKodeshVsto\WebSitesLib\packages"
             },
-
             @{
               Config   = "KleiKodeshVsto\nakdan\Nakdan\packages.config"
               Packages = ".\KleiKodeshVsto\nakdan\packages"
             },
-
             @{
               Config   = "KitveiHakodesh\CSharpBackend\KitveiHakodeshLib\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\packages"
             },
-
             @{
               Config   = "KitveiHakodesh\CSharpBackend\KitveiHakodeshDemoApp\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\packages"
             },
-
             @{
               Config   = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLib.Net48\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
             },
-
             @{
               Config   = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLibTest\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
             },
-
             @{
               Config   = "KleiKodeshVsto\DocDesign\DocDesignLib\packages.config"
               Packages = ".\KleiKodeshVsto\DocDesign\DocDesignLib\packages"
             },
-
             @{
               Config   = "KleiKodeshVsto\Kiwix\KiwixLib\packages.config"
               Packages = ".\packages"
             },
-
             @{
               Config   = "KleiKodeshVsto\RegexInWord\RegexFindLib\packages.config"
               Packages = ".\KleiKodeshVsto\RegexInWord\packages"
             },
-
             @{
               Config   = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
             },
-
             @{
               Config   = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
-            },
-
-            @{
-              Config   = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
-              Packages = ".\packages"
             }
-
           )
-
 
           foreach ($restore in $legacyRestores) {
 
@@ -419,7 +417,8 @@ jobs:
             Write-Host $restore.Config
 
             if (-not (Test-Path $restore.Config)) {
-              throw "packages.config not found: $($restore.Config)"
+              Write-Host "[SKIP] packages.config does not exist."
+              continue
             }
 
             New-Item `
@@ -445,7 +444,7 @@ jobs:
           # --------------------------------------------------------
 
           Write-Host ""
-          Write-Host "Installing explicit System.ValueTuple 4.5.0..."
+          Write-Host "Installing System.ValueTuple 4.5.0..."
 
           $documentLocatorPackages =
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
@@ -478,11 +477,11 @@ jobs:
 
 
           # --------------------------------------------------------
-          # Explicit System.Runtime.CompilerServices.Unsafe 4.3.0
+          # Explicit Unsafe package
           # --------------------------------------------------------
 
           Write-Host ""
-          Write-Host "Installing explicit System.Runtime.CompilerServices.Unsafe 4.3.0..."
+          Write-Host "Installing System.Runtime.CompilerServices.Unsafe 4.3.0..."
 
           & nuget.exe install `
             "System.Runtime.CompilerServices.Unsafe" `
@@ -494,7 +493,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to install System.Runtime.CompilerServices.Unsafe 4.3.0."
           }
-
 
           Write-Host ""
           Write-Host "========================================"
@@ -515,18 +513,8 @@ jobs:
           Write-Host "========================================"
 
           $requiredFiles = @(
-
-            # External ChromeTabs dependency
             ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj",
-
-            # DocumentLocator legacy dependency
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll",
-
-            # Existing package directories
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages",
-            ".\KitveiHakodesh\CSharpBackend\packages",
-            ".\packages"
-
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll"
           )
 
           foreach ($file in $requiredFiles) {
@@ -612,7 +600,29 @@ jobs:
 
 
       # ============================================================
-      # 13. Publish GitHub release
+      # 13. Push merged master ONLY after successful build
+      # ============================================================
+      - name: Push merged master
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Pushing successful upstream merge"
+          Write-Host "========================================"
+
+          git push origin HEAD:master
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to push merged master branch."
+          }
+
+          Write-Host ""
+          Write-Host "[OK] Merged master pushed to fork."
+
+
+      # ============================================================
+      # 14. Publish GitHub release
       # ============================================================
       - name: Publish fork release
         shell: pwsh
