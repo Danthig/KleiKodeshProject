@@ -70,11 +70,19 @@ jobs:
           "UPSTREAM_RELEASE=$version" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          git fetch upstream `
-            "refs/tags/$version:refs/tags/upstream-release"
+          # Fetch the actual upstream release tag.
+          # Do not construct a second refs/tags/ prefix here.
+          git fetch upstream "refs/tags/$version"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to fetch upstream release $version."
+          }
+
+          # Create/update a simple local tag pointing to the fetched tag.
+          git tag -f upstream-release "refs/tags/$version"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create local upstream-release tag."
           }
 
 
@@ -136,6 +144,7 @@ jobs:
 
           if (Test-Path $chromeTabsPath) {
             Write-Host "Removing existing ChromeTabs directory..."
+
             Remove-Item `
               -Recurse `
               -Force `
@@ -296,7 +305,7 @@ jobs:
 
           Write-Host ""
           Write-Host "Restoring WpfLib..."
-          
+
           & $env:MSBUILD_PATH `
             "WpfLib\WpfLib.csproj" `
             /t:Restore `
@@ -432,11 +441,7 @@ jobs:
 
 
           # --------------------------------------------------------
-          # Explicit legacy dependencies
-          #
-          # DocumentLocator.Service references this exact DLL:
-          #
-          # System.ValueTuple 4.5.0
+          # Explicit System.ValueTuple 4.5.0
           # --------------------------------------------------------
 
           Write-Host ""
@@ -462,7 +467,6 @@ jobs:
             throw "Failed to install System.ValueTuple 4.5.0."
           }
 
-
           $legacyValueTuple =
             "$documentLocatorPackages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll"
 
@@ -474,7 +478,7 @@ jobs:
 
 
           # --------------------------------------------------------
-          # Explicit System.Runtime.CompilerServices.Unsafe
+          # Explicit System.Runtime.CompilerServices.Unsafe 4.3.0
           # --------------------------------------------------------
 
           Write-Host ""
@@ -499,7 +503,7 @@ jobs:
 
 
       # ============================================================
-      # 10. Verify external dependency and important restored files
+      # 10. Verify build dependencies
       # ============================================================
       - name: Verify build dependencies
         shell: pwsh
@@ -510,7 +514,6 @@ jobs:
           Write-Host "Verifying build dependencies"
           Write-Host "========================================"
 
-
           $requiredFiles = @(
 
             # External ChromeTabs dependency
@@ -519,13 +522,12 @@ jobs:
             # DocumentLocator legacy dependency
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll",
 
-            # Existing package directories/files
+            # Existing package directories
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages",
             ".\KitveiHakodesh\CSharpBackend\packages",
             ".\packages"
 
           )
-
 
           foreach ($file in $requiredFiles) {
 
@@ -535,7 +537,6 @@ jobs:
 
             Write-Host "[OK] $file"
           }
-
 
           Write-Host ""
           Write-Host "========================================"
@@ -592,7 +593,6 @@ jobs:
             "$releaseDir/KitveiHakodeshPortable-$version.zip"
           )
 
-
           foreach ($asset in $assets) {
 
             if (-not (Test-Path $asset)) {
@@ -604,7 +604,6 @@ jobs:
             Write-Host "[OK] $asset"
             Write-Host "     Size: $size bytes"
           }
-
 
           Write-Host ""
           Write-Host "========================================"
@@ -636,7 +635,6 @@ jobs:
             "$releaseDir/KitveiHakodeshPortable-$version.zip"
           )
 
-
           # --------------------------------------------------------
           # Check whether release already exists
           # --------------------------------------------------------
@@ -644,7 +642,6 @@ jobs:
           gh release view `
             $version `
             --repo "${{ github.repository }}"
-
 
           if ($LASTEXITCODE -eq 0) {
 
@@ -679,7 +676,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to create GitHub release $version."
           }
-
 
           Write-Host ""
           Write-Host "========================================"
