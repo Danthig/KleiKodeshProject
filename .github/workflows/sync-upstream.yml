@@ -49,7 +49,7 @@ jobs:
         run: |
           choco install nsis -y --no-progress
 
-                - name: Locate MSBuild
+      - name: Install NSIS
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
