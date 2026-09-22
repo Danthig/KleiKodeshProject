@@ -15,6 +15,7 @@ concurrency:
 jobs:
   sync-build-release:
     runs-on: windows-latest
+
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -26,9 +27,18 @@ jobs:
         shell: pwsh
         run: |
           git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/KleiKodesh/KleiKodeshProject/releases/latest" -Headers @{ "User-Agent" = "KleiKodesh-ForkSync" }
-          if ($release.tag_name -notmatch '^v\d+\.\d+\.\d+$') { throw "Invalid upstream release tag: $($release.tag_name)" }
-          "UPSTREAM_RELEASE=$($release.tag_name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+
+          $release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/KleiKodesh/KleiKodeshProject/releases/latest" `
+            -Headers @{ "User-Agent" = "KleiKodesh-ForkSync" }
+
+          if ($release.tag_name -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Invalid upstream release tag: $($release.tag_name)"
+          }
+
+          "UPSTREAM_RELEASE=$($release.tag_name)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+
           git fetch upstream "refs/tags/$($release.tag_name):refs/tags/upstream-release"
 
       - name: Merge upstream changes
@@ -36,26 +46,27 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git merge --no-edit upstream-release
+
           if ($LASTEXITCODE -ne 0) {
             git merge --abort
             Write-Host "Merge conflict detected. The release will not be built." -ForegroundColor Red
             exit 1
           }
+
           git push origin HEAD:master
 
       - name: Initialize submodules (latest remote HEAD)
         shell: pwsh
         run: |
-          # One or more submodule pointers in this repo's history can reference a
-          # commit that was never pushed to the submodule's own remote (upload-pack:
-          # "not our ref"). A plain `git submodule update --init --recursive` fails
-          # hard on that exact commit, so `--remote` is used instead: it ignores the
-          # pinned SHA and checks out each submodule's tracked branch HEAD instead.
-          # Runs after the merge so submodules are initialized against the final,
-          # post-merge tree rather than the pre-merge one.
+          # Some historical submodule pointers can reference commits that are
+          # no longer available from the submodule's remote. Therefore we use
+          # --remote instead of requiring the exact pinned SHA.
           git submodule sync --recursive
+
           git submodule update --init --recursive --remote
+
           if ($LASTEXITCODE -ne 0) {
             throw "git submodule update failed with exit code $LASTEXITCODE"
           }
@@ -69,29 +80,38 @@ jobs:
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
           if (-not (Test-Path $vswhere)) {
             throw "vswhere.exe was not found at: $vswhere"
           }
+
           Write-Host "Searching for MSBuild with vswhere..."
+
           $msbuild = & $vswhere `
             -latest `
             -products * `
             -requires Microsoft.Component.MSBuild `
             -find "MSBuild\**\Bin\MSBuild.exe" |
             Select-Object -First 1
+
           if (-not $msbuild) {
             throw "MSBuild.exe was not found by vswhere."
           }
+
           $msbuild = $msbuild.Trim()
+
           if (-not (Test-Path $msbuild)) {
             throw "vswhere returned an invalid MSBuild path: $msbuild"
           }
+
           Write-Host "MSBuild found:"
           Write-Host $msbuild
-          "MSBUILD_PATH=$msbuild" | Out-File `
-            -FilePath $env:GITHUB_ENV `
-            -Encoding utf8 `
-            -Append
+
+          "MSBUILD_PATH=$msbuild" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
 
       - name: Install NuGet CLI
         shell: pwsh
@@ -116,8 +136,8 @@ jobs:
           Write-Host "Restoring SDK-style projects"
           Write-Host "========================================"
 
-          # WpfLib is SDK-style and is referenced by several legacy projects.
-          # It targets both net48 and net10.0-windows, so restore it explicitly.
+          # WpfLib is SDK-style and is referenced by legacy projects.
+          # It targets both net48 and net10.0-windows.
           & $env:MSBUILD_PATH `
             "WpfLib\WpfLib.csproj" `
             /t:Restore `
@@ -127,19 +147,57 @@ jobs:
             throw "MSBuild restore failed for WpfLib.csproj with exit code $LASTEXITCODE"
           }
 
+          if (-not (Test-Path ".\WpfLib\obj\project.assets.json")) {
+            throw "WpfLib restore did not create project.assets.json"
+          }
+
           Write-Host "[OK] WpfLib restore"
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "Restoring DocumentLocator SDK project"
+          Write-Host "========================================"
+
+          # DocumentLocator is an SDK-style project inside the
+          # KitveiHakodesh/DocumentLocator submodule.
+          #
+          # Its net48 target requires project.assets.json, so it must
+          # be explicitly restored before the legacy service project
+          # attempts to build it.
+          $documentLocatorProject = `
+            "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\DocumentLocator.csproj"
+
+          if (-not (Test-Path $documentLocatorProject)) {
+            throw "DocumentLocator project not found: $documentLocatorProject"
+          }
+
+          & $env:MSBUILD_PATH `
+            $documentLocatorProject `
+            /t:Restore `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSBuild restore failed for DocumentLocator.csproj with exit code $LASTEXITCODE"
+          }
+
+          $documentLocatorAssets = `
+            "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json"
+
+          if (-not (Test-Path $documentLocatorAssets)) {
+            throw "DocumentLocator restore did not create project.assets.json"
+          }
+
+          Write-Host "[OK] DocumentLocator SDK project restore"
 
           Write-Host ""
           Write-Host "========================================"
           Write-Host "Restoring legacy packages.config projects"
           Write-Host "========================================"
 
-          # IMPORTANT:
-          # This repository does NOT use one single packages directory.
-          # Several legacy projects contain HintPath/Import paths relative
-          # to their own project directory. Therefore each packages.config
-          # must be restored into the packages directory expected by the
-          # corresponding project.
+          # This repository uses multiple packages directories.
+          # Each packages.config is restored into the directory expected
+          # by the corresponding project HintPath / Import statements.
 
           $legacyRestores = @(
             @{
@@ -185,6 +243,27 @@ jobs:
             @{
               Config = "KleiKodeshVsto\RegexInWord\RegexFindLib\packages.config"
               Packages = ".\KleiKodeshVsto\RegexInWord\RegexFindLib\packages"
+            },
+
+            # ------------------------------------------------------------
+            # DocumentLocator submodule
+            # ------------------------------------------------------------
+
+            # DocumentLocator core library:
+            # packages.config is located directly under DocumentLocator,
+            # therefore packages must also be restored directly there.
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
+              Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
+            },
+
+            # DocumentLocator Windows service:
+            # packages.config is under DocumentLocator.Service, but its
+            # HintPaths/imports expect the same DocumentLocator\packages
+            # directory.
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
+              Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
             }
           )
 
@@ -199,9 +278,11 @@ jobs:
               throw "packages.config not found: $($restore.Config)"
             }
 
-            New-Item -ItemType Directory `
+            New-Item `
+              -ItemType Directory `
               -Force `
-              -Path $restore.Packages | Out-Null
+              -Path $restore.Packages |
+              Out-Null
 
             & nuget.exe restore `
               $restore.Config `
@@ -222,25 +303,78 @@ jobs:
           Write-Host "========================================"
 
           $requiredFiles = @(
+
+            # ------------------------------------------------------------
             # Main VSTO project
+            # ------------------------------------------------------------
+
             ".\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
             ".\packages\Microsoft.Web.WebView2.1.0.3912.50\build\Microsoft.Web.WebView2.targets",
+
             ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
 
+            # ------------------------------------------------------------
             # WebSitesLib
+            # ------------------------------------------------------------
+
             ".\KleiKodeshVsto\WebSitesLib\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
 
+            # ------------------------------------------------------------
             # Nakdan
+            # ------------------------------------------------------------
+
             ".\KleiKodeshVsto\nakdan\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets",
 
+            # ------------------------------------------------------------
             # KitveiHakodesh CSharpBackend
+            # ------------------------------------------------------------
+
             ".\KitveiHakodesh\CSharpBackend\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
 
+            # ------------------------------------------------------------
             # FtsLib
+            # ------------------------------------------------------------
+
             ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
 
+            # ------------------------------------------------------------
             # WpfLib SDK-style restore
-            ".\WpfLib\obj\project.assets.json"
+            # ------------------------------------------------------------
+
+            ".\WpfLib\obj\project.assets.json",
+
+            # ------------------------------------------------------------
+            # DocumentLocator SDK-style restore
+            # ------------------------------------------------------------
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json",
+
+            # ------------------------------------------------------------
+            # DocumentLocator core packages
+            # ------------------------------------------------------------
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\J2N.2.0.0\lib\net45\J2N.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Lucene.Net.4.8.0-beta00016\lib\net45\Lucene.Net.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Memory.4.6.3\lib\net462\System.Memory.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Text.Json.8.0.6\lib\net462\System.Text.Json.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll",
+
+            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets"
           )
 
           foreach ($file in $requiredFiles) {
@@ -271,27 +405,35 @@ jobs:
         run: |
           $version = $env:UPSTREAM_RELEASE
           $releaseDir = "Build/releases"
+
           $assets = @(
             "$releaseDir/KleiKodeshSetup-$version.exe",
             "$releaseDir/KleiKodeshSetup-$version-x64.exe",
             "$releaseDir/KleiKodeshSetup-$version-x86.exe",
             "$releaseDir/KitveiHakodeshPortable-$version.zip"
           )
+
           foreach ($asset in $assets) {
             if (-not (Test-Path $asset)) {
               throw "Missing release asset: $asset"
             }
           }
 
-          $existing = gh release view $version --repo "${{ github.repository }}" 2>$null
+          $existing = gh release view `
+            $version `
+            --repo "${{ github.repository }}" `
+            2>$null
+
           if ($LASTEXITCODE -eq 0) {
-            gh release delete $version `
+            gh release delete `
+              $version `
               --repo "${{ github.repository }}" `
               --yes `
               --cleanup-tag
           }
 
-          gh release create $version `
+          gh release create `
+            $version `
             $assets `
             --repo "${{ github.repository }}" `
             --title "KleiKodesh $version" `
