@@ -21,7 +21,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          submodules: recursive
 
       - name: Configure upstream remote
         shell: pwsh
@@ -44,6 +43,22 @@ jobs:
             exit 1
           }
           git push origin HEAD:master
+
+      - name: Initialize submodules (latest remote HEAD)
+        shell: pwsh
+        run: |
+          # One or more submodule pointers in this repo's history can reference a
+          # commit that was never pushed to the submodule's own remote (upload-pack:
+          # "not our ref"). A plain `git submodule update --init --recursive` fails
+          # hard on that exact commit, so `--remote` is used instead: it ignores the
+          # pinned SHA and checks out each submodule's tracked branch HEAD instead.
+          # Runs after the merge so submodules are initialized against the final,
+          # post-merge tree rather than the pre-merge one.
+          git submodule sync --recursive
+          git submodule update --init --recursive --remote
+          if ($LASTEXITCODE -ne 0) {
+            throw "git submodule update failed with exit code $LASTEXITCODE"
+          }
 
       - name: Install NSIS
         shell: pwsh
