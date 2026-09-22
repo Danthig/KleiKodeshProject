@@ -183,7 +183,47 @@ jobs:
 
 
       # ============================================================
-      # 5. Initialize Git submodules
+      # 5. Restore the external ChromeTabs project
+      #
+      # EasyTabs/FluentChromeTabs is an SDK-style .NET Framework 4.8
+      # project. It is cloned during the workflow, so the regular
+      # NuGet restore steps do not create its project.assets.json.
+      # MSBuild later requires that file and otherwise fails with
+      # NETSDK1004.
+      # ============================================================
+      - name: Restore ChromeTabs project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Restoring ChromeTabs project"
+          Write-Host "========================================"
+
+          $chromeTabsProject = ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj"
+          $assetsFile = ".\ChromeTabs\FluentChromeTabs\obj\project.assets.json"
+
+          if (-not (Test-Path $chromeTabsProject)) {
+            throw "ChromeTabs project was not found: $chromeTabsProject"
+          }
+
+          dotnet restore $chromeTabsProject --verbosity normal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "ChromeTabs restore failed."
+          }
+
+          if (-not (Test-Path $assetsFile)) {
+            throw "ChromeTabs restore completed but project.assets.json was not created: $assetsFile"
+          }
+
+          Write-Host ""
+          Write-Host "[OK] ChromeTabs NuGet restore completed."
+          Write-Host "[OK] project.assets.json exists."
+
+
+      # ============================================================
+      # 6. Initialize submodules
       # ============================================================
       - name: Initialize submodules
         shell: pwsh
@@ -211,7 +251,7 @@ jobs:
 
 
       # ============================================================
-      # 6. Install NSIS
+      # 7. Install NSIS
       # ============================================================
       - name: Install NSIS
         shell: pwsh
@@ -232,7 +272,7 @@ jobs:
 
 
       # ============================================================
-      # 7. Locate MSBuild
+      # 8. Locate MSBuild
       # ============================================================
       - name: Locate MSBuild
         shell: pwsh
@@ -272,7 +312,7 @@ jobs:
 
 
       # ============================================================
-      # 8. Install NuGet CLI
+      # 9. Install NuGet CLI
       # ============================================================
       - name: Install NuGet CLI
         shell: pwsh
@@ -301,7 +341,7 @@ jobs:
 
 
       # ============================================================
-      # 9. Restore NuGet packages
+      # 10. Restore NuGet packages
       # ============================================================
       - name: Restore NuGet packages
         shell: pwsh
@@ -501,7 +541,7 @@ jobs:
 
 
       # ============================================================
-      # 10. Verify build dependencies
+      # 11. Verify build dependencies
       # ============================================================
       - name: Verify build dependencies
         shell: pwsh
@@ -533,7 +573,7 @@ jobs:
 
 
       # ============================================================
-      # 11. Build installer
+      # 12. Build installer
       # ============================================================
       - name: Build installer
         shell: pwsh
@@ -560,7 +600,7 @@ jobs:
 
 
       # ============================================================
-      # 12. Verify release assets
+      # 13. Verify release assets
       # ============================================================
       - name: Verify release assets
         shell: pwsh
@@ -600,7 +640,7 @@ jobs:
 
 
       # ============================================================
-      # 13. Push merged master ONLY after successful build
+      # 14. Push merged master ONLY after successful build
       # ============================================================
       - name: Push merged master
         shell: pwsh
@@ -622,7 +662,7 @@ jobs:
 
 
       # ============================================================
-      # 14. Publish GitHub release
+      # 15. Publish GitHub release
       # ============================================================
       - name: Publish fork release
         shell: pwsh
