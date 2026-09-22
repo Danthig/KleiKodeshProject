@@ -430,7 +430,6 @@ jobs:
 
             ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\Microsoft.Extensions.Primitives.1.1.1\lib\netstandard1.0\Microsoft.Extensions.Primitives.dll",
 
-            ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll",
 
             # ------------------------------------------------------------
             # DocumentLocator service HintPath dependencies in root packages
