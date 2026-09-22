@@ -49,41 +49,54 @@ jobs:
         run: |
           choco install nsis -y --no-progress
 
-      - name: Install NSIS
+      - name: Locate MSBuild
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-
           if (-not (Test-Path $vswhere)) {
             throw "vswhere.exe was not found at: $vswhere"
           }
-
           Write-Host "Searching for MSBuild with vswhere..."
-
           $msbuild = & $vswhere `
             -latest `
             -products * `
             -requires Microsoft.Component.MSBuild `
             -find "MSBuild\**\Bin\MSBuild.exe" |
             Select-Object -First 1
-
           if (-not $msbuild) {
             throw "MSBuild.exe was not found by vswhere."
           }
-
           $msbuild = $msbuild.Trim()
-
           if (-not (Test-Path $msbuild)) {
             throw "vswhere returned an invalid MSBuild path: $msbuild"
           }
-
           Write-Host "MSBuild found:"
           Write-Host $msbuild
-
           "MSBUILD_PATH=$msbuild" | Out-File `
             -FilePath $env:GITHUB_ENV `
             -Encoding utf8 `
             -Append
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path . -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) {
+            throw "No .sln file found in the repository for NuGet restore."
+          }
+          Write-Host "Restoring packages for solution:"
+          Write-Host $sln.FullName
+
+          $nuget = Get-Command nuget -ErrorAction SilentlyContinue
+          if (-not $nuget) {
+            Write-Host "nuget.exe not found on PATH, installing via Chocolatey..."
+            choco install nuget.commandline -y --no-progress
+          }
+
+          nuget restore $sln.FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "nuget restore failed with exit code $LASTEXITCODE"
+          }
 
       - name: Build installer
         shell: pwsh
@@ -106,7 +119,6 @@ jobs:
             "$releaseDir/KleiKodeshSetup-$version-x86.exe",
             "$releaseDir/KitveiHakodeshPortable-$version.zip"
           )
-
           foreach ($asset in $assets) {
             if (-not (Test-Path $asset)) {
               throw "Missing release asset: $asset"
