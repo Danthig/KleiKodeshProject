@@ -49,6 +49,42 @@ jobs:
         run: |
           choco install nsis -y --no-progress
 
+                - name: Locate MSBuild
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe was not found at: $vswhere"
+          }
+
+          Write-Host "Searching for MSBuild with vswhere..."
+
+          $msbuild = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" |
+            Select-Object -First 1
+
+          if (-not $msbuild) {
+            throw "MSBuild.exe was not found by vswhere."
+          }
+
+          $msbuild = $msbuild.Trim()
+
+          if (-not (Test-Path $msbuild)) {
+            throw "vswhere returned an invalid MSBuild path: $msbuild"
+          }
+
+          Write-Host "MSBuild found:"
+          Write-Host $msbuild
+
+          "MSBUILD_PATH=$msbuild" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
       - name: Build installer
         shell: pwsh
         run: |
