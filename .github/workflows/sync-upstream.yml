@@ -110,48 +110,151 @@ jobs:
       - name: Restore NuGet packages
         shell: pwsh
         run: |
-          Write-Host "Restoring SDK-style installer project..."
+          $ErrorActionPreference = "Stop"
 
+          Write-Host "========================================"
+          Write-Host "Restoring SDK-style projects"
+          Write-Host "========================================"
+
+          # WpfLib is SDK-style and is referenced by several legacy projects.
+          # It targets both net48 and net10.0-windows, so restore it explicitly.
           & $env:MSBUILD_PATH `
-            "Build\Installer\KleiKodeshVstoInstallerWpf.csproj" `
-            /t:restore `
+            "WpfLib\WpfLib.csproj" `
+            /t:Restore `
             /p:Configuration=Release
 
           if ($LASTEXITCODE -ne 0) {
-            throw "MSBuild restore failed for KleiKodeshVstoInstallerWpf.csproj with exit code $LASTEXITCODE"
+            throw "MSBuild restore failed for WpfLib.csproj with exit code $LASTEXITCODE"
+          }
+
+          Write-Host "[OK] WpfLib restore"
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "Restoring legacy packages.config projects"
+          Write-Host "========================================"
+
+          # IMPORTANT:
+          # This repository does NOT use one single packages directory.
+          # Several legacy projects contain HintPath/Import paths relative
+          # to their own project directory. Therefore each packages.config
+          # must be restored into the packages directory expected by the
+          # corresponding project.
+
+          $legacyRestores = @(
+            @{
+              Config = "KleiKodeshVsto\packages.config"
+              Packages = ".\packages"
+            },
+            @{
+              Config = "UpdateCheckerLib\packages.config"
+              Packages = ".\packages"
+            },
+            @{
+              Config = "KleiKodeshVsto\WebSitesLib\WebSitesLib\packages.config"
+              Packages = ".\KleiKodeshVsto\WebSitesLib\packages"
+            },
+            @{
+              Config = "KleiKodeshVsto\nakdan\Nakdan\packages.config"
+              Packages = ".\KleiKodeshVsto\nakdan\packages"
+            },
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\KitveiHakodeshLib\packages.config"
+              Packages = ".\KitveiHakodesh\CSharpBackend\packages"
+            },
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\KitveiHakodeshDemoApp\packages.config"
+              Packages = ".\KitveiHakodesh\CSharpBackend\packages"
+            },
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLib.Net48\packages.config"
+              Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
+            },
+            @{
+              Config = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLibTest\packages.config"
+              Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
+            },
+            @{
+              Config = "KleiKodeshVsto\DocDesign\DocDesignLib\packages.config"
+              Packages = ".\KleiKodeshVsto\DocDesign\DocDesignLib\packages"
+            },
+            @{
+              Config = "KleiKodeshVsto\Kiwix\KiwixLib\packages.config"
+              Packages = ".\packages"
+            },
+            @{
+              Config = "KleiKodeshVsto\RegexInWord\RegexFindLib\packages.config"
+              Packages = ".\KleiKodeshVsto\RegexInWord\RegexFindLib\packages"
+            }
+          )
+
+          foreach ($restore in $legacyRestores) {
+            Write-Host ""
+            Write-Host "----------------------------------------"
+            Write-Host "Config:   $($restore.Config)"
+            Write-Host "Packages: $($restore.Packages)"
+            Write-Host "----------------------------------------"
+
+            if (-not (Test-Path $restore.Config)) {
+              throw "packages.config not found: $($restore.Config)"
+            }
+
+            New-Item -ItemType Directory `
+              -Force `
+              -Path $restore.Packages | Out-Null
+
+            & nuget.exe restore `
+              $restore.Config `
+              -PackagesDirectory $restore.Packages `
+              -NonInteractive `
+              -Verbosity normal
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "NuGet restore failed for $($restore.Config) with exit code $LASTEXITCODE"
+            }
+
+            Write-Host "[OK] $($restore.Config)"
           }
 
           Write-Host ""
-          Write-Host "Restoring legacy packages.config packages..."
-
-          nuget.exe restore `
-            "KleiKodeshVsto\packages.config" `
-            -PackagesDirectory ".\packages" `
-            -NonInteractive
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "NuGet packages.config restore failed with exit code $LASTEXITCODE"
-          }
-
-          Write-Host ""
-          Write-Host "Verifying required VSTO package files..."
+          Write-Host "========================================"
+          Write-Host "Verifying required package files"
+          Write-Host "========================================"
 
           $requiredFiles = @(
+            # Main VSTO project
             ".\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
             ".\packages\Microsoft.Web.WebView2.1.0.3912.50\build\Microsoft.Web.WebView2.targets",
-            ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets"
+            ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
+
+            # WebSitesLib
+            ".\KleiKodeshVsto\WebSitesLib\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
+            # Nakdan
+            ".\KleiKodeshVsto\nakdan\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets",
+
+            # KitveiHakodesh CSharpBackend
+            ".\KitveiHakodesh\CSharpBackend\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+
+            # FtsLib
+            ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
+
+            # WpfLib SDK-style restore
+            ".\WpfLib\obj\project.assets.json"
           )
 
           foreach ($file in $requiredFiles) {
             if (-not (Test-Path $file)) {
-              throw "Required NuGet file was not restored: $file"
+              throw "Required restored file is missing: $file"
             }
 
             Write-Host "[OK] $file"
           }
 
           Write-Host ""
+          Write-Host "========================================"
           Write-Host "NuGet restore completed successfully."
+          Write-Host "========================================"
 
       - name: Build installer
         shell: pwsh
