@@ -93,32 +93,65 @@ jobs:
             -Encoding utf8 `
             -Append
 
+      - name: Install NuGet CLI
+        shell: pwsh
+        run: |
+          choco install nuget.commandline -y --no-progress
+
+          $nuget = Get-Command nuget.exe -ErrorAction SilentlyContinue
+
+          if (-not $nuget) {
+            throw "NuGet CLI was not found after installation."
+          }
+
+          Write-Host "NuGet found at:"
+          Write-Host $nuget.Source
+
       - name: Restore NuGet packages
         shell: pwsh
         run: |
-          # Restoring the whole .slnx pulls in every project listed there, including
-          # ones unrelated to the installer build (e.g. ChromeTabs/FluentChromeTabs,
-          # which is missing from the checked-out tree entirely -- an upstream repo
-          # issue, not something restore can work around). build-installer.ps1 only
-          # ever builds KleiKodeshVsto.csproj (via KleiKodeshVstoInstallerWpf.csproj's
-          # own BuildVstoAndPack target), so only those two are restored here.
-          #
-          # KleiKodeshVsto.csproj uses the legacy packages.config format, not
-          # PackageReference. `msbuild /t:restore` only restores PackageReference
-          # projects unless RestorePackagesConfig=true is passed explicitly -- without
-          # it, restore silently no-ops for this project and the build fails later
-          # with "missing NuGet package(s)" (e.g. System.ValueTuple).
-          $projects = @(
-            "KleiKodeshVsto\KleiKodeshVsto.csproj",
-            "Build\Installer\KleiKodeshVstoInstallerWpf.csproj"
-          )
-          foreach ($project in $projects) {
-            Write-Host "Restoring $project ..."
-            & $env:MSBUILD_PATH $project /t:restore /p:Configuration=Release /p:RestorePackagesConfig=true
-            if ($LASTEXITCODE -ne 0) {
-              throw "MSBuild restore failed for $project with exit code $LASTEXITCODE"
-            }
+          Write-Host "Restoring SDK-style installer project..."
+
+          & $env:MSBUILD_PATH `
+            "Build\Installer\KleiKodeshVstoInstallerWpf.csproj" `
+            /t:restore `
+            /p:Configuration=Release
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSBuild restore failed for KleiKodeshVstoInstallerWpf.csproj with exit code $LASTEXITCODE"
           }
+
+          Write-Host ""
+          Write-Host "Restoring legacy packages.config packages..."
+
+          nuget.exe restore `
+            "KleiKodeshVsto\packages.config" `
+            -PackagesDirectory ".\packages" `
+            -NonInteractive
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "NuGet packages.config restore failed with exit code $LASTEXITCODE"
+          }
+
+          Write-Host ""
+          Write-Host "Verifying required VSTO package files..."
+
+          $requiredFiles = @(
+            ".\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
+            ".\packages\Microsoft.Web.WebView2.1.0.3912.50\build\Microsoft.Web.WebView2.targets",
+            ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required NuGet file was not restored: $file"
+            }
+
+            Write-Host "[OK] $file"
+          }
+
+          Write-Host ""
+          Write-Host "NuGet restore completed successfully."
 
       - name: Build installer
         shell: pwsh
