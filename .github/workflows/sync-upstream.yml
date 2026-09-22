@@ -81,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Restoring packages for KleiKodeshProject.slnx using MSBuild..."
-          & $env:MSBUILD_PATH "KleiKodeshProject.slnx" /t:restore /p:Configuration=Release /p:Platform=x64
+          & $env:MSBUILD_PATH "KleiKodeshProject.slnx" /t:restore /p:Configuration=Release
           if ($LASTEXITCODE -ne 0) {
             throw "MSBuild restore failed with exit code $LASTEXITCODE"
           }
