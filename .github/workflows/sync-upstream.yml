@@ -80,22 +80,10 @@ jobs:
       - name: Restore NuGet packages
         shell: pwsh
         run: |
-          $sln = Get-ChildItem -Path . -Recurse -Filter *.sln | Select-Object -First 1
-          if (-not $sln) {
-            throw "No .sln file found in the repository for NuGet restore."
-          }
-          Write-Host "Restoring packages for solution:"
-          Write-Host $sln.FullName
-
-          $nuget = Get-Command nuget -ErrorAction SilentlyContinue
-          if (-not $nuget) {
-            Write-Host "nuget.exe not found on PATH, installing via Chocolatey..."
-            choco install nuget.commandline -y --no-progress
-          }
-
-          nuget restore $sln.FullName
+          Write-Host "Restoring packages for KleiKodeshProject.slnx using MSBuild..."
+          & $env:MSBUILD_PATH "KleiKodeshProject.slnx" /t:restore /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) {
-            throw "nuget restore failed with exit code $LASTEXITCODE"
+            throw "MSBuild restore failed with exit code $LASTEXITCODE"
           }
 
       - name: Build installer
