@@ -867,7 +867,67 @@ jobs:
 
 
       # ============================================================
-      # 13. Build installer
+      # 13. Install VSTO Runtime
+      #
+      # The VSTO build task VerifyClickOnceSigningSettings
+      # (Microsoft.VisualStudio.Tools.Office.targets line 162)
+      # requires Microsoft.VisualStudio.Tools.Applications.Hosting
+      # 10.0.0.0 from the "Visual Studio Tools for Office Runtime",
+      # which is not installed on the hosted runner. Without it the
+      # build fails with MSB4018 / FileNotFoundException for
+      # Microsoft.VisualStudio.Tools.Applications.Hosting.
+      #
+      # vstor_redist.exe = official Microsoft download of the
+      # "Microsoft Visual Studio 2010 Tools for Office Runtime"
+      # (fwlink 158917). Silent install; exit code 3010 means
+      # success with reboot pending (safe to ignore in CI).
+      # ============================================================
+      - name: Install VSTO Runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Installing VSTO Runtime (vstor_redist)"
+          Write-Host "========================================"
+
+          $setup = Join-Path $env:RUNNER_TEMP "vstor_redist.exe"
+          $url = "https://go.microsoft.com/fwlink/?LinkId=158917"
+
+          Invoke-WebRequest -Uri $url -OutFile $setup -UseBasicParsing
+
+          if (-not (Test-Path $setup)) {
+            throw "vstor_redist.exe download failed."
+          }
+
+          Write-Host "Downloaded: $((Get-Item $setup).Length) bytes"
+
+          $proc = Start-Process -FilePath $setup -ArgumentList "/q", "/norestart" -Wait -PassThru
+          $code = $proc.ExitCode
+
+          if ($code -ne 0 -and $code -ne 3010) {
+            throw "vstor_redist.exe failed with exit code $code."
+          }
+
+          $gacProbe = @(
+            (Join-Path $env:WINDIR "Microsoft.NET\assembly\GAC_MSIL\Microsoft.VisualStudio.Tools.Applications.Hosting"),
+            (Join-Path $env:WINDIR "assembly\GAC_MSIL\Microsoft.VisualStudio.Tools.Applications.Hosting")
+          )
+
+          $found = $gacProbe | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if ($found) {
+            Write-Host "[OK] Hosting assembly present in GAC: $found"
+          }
+          else {
+            Write-Warning "Hosting assembly not found in expected GAC paths; continuing."
+          }
+
+          Write-Host "[OK] VSTO Runtime installed (exit code $code)."
+
+
+      # ============================================================
+      # 14. Build installer
       # ============================================================
 
       - name: Build installer
@@ -893,7 +953,7 @@ jobs:
 
 
       # ============================================================
-      # 14. Publish GitHub release
+      # 15. Publish GitHub release
       # ============================================================
 
       - name: Publish fork release
