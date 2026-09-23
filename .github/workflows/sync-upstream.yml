@@ -127,7 +127,103 @@ jobs:
 
 
       # ============================================================
-      # 4. Initialize and update submodules
+      # 4. Clone external ChromeTabs dependency
+      #
+      # KleiKodesh references:
+      #
+      #   ChromeTabs/FluentChromeTabs/FluentChromeTabs.csproj
+      #
+      # ChromeTabs is not a submodule.
+      # The external repository is:
+      #
+      #   KleiKodesh/EasyTabs
+      #
+      # It must exist locally under the directory name ChromeTabs.
+      # ============================================================
+      - name: Clone external ChromeTabs dependency
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Cloning ChromeTabs dependency"
+          Write-Host "========================================"
+
+          $chromeTabsPath = ".\ChromeTabs"
+
+          if (Test-Path $chromeTabsPath) {
+            Write-Host "Removing existing ChromeTabs directory..."
+
+            Remove-Item `
+              -Recurse `
+              -Force `
+              $chromeTabsPath
+          }
+
+          git clone `
+            --depth 1 `
+            https://github.com/KleiKodesh/EasyTabs.git `
+            $chromeTabsPath
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to clone KleiKodesh/EasyTabs."
+          }
+
+          $chromeTabsProject =
+            ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj"
+
+          if (-not (Test-Path $chromeTabsProject)) {
+            throw "FluentChromeTabs project was not found: $chromeTabsProject"
+          }
+
+          Write-Host ""
+          Write-Host "[OK] ChromeTabs repository cloned."
+          Write-Host "[OK] FluentChromeTabs.csproj found."
+          Write-Host $chromeTabsProject
+
+
+      # ============================================================
+      # 5. Restore the external ChromeTabs project
+      #
+      # EasyTabs/FluentChromeTabs is an SDK-style .NET Framework 4.8
+      # project. It is cloned during the workflow, so the regular
+      # NuGet restore steps do not create its project.assets.json.
+      # MSBuild later requires that file and otherwise fails with
+      # NETSDK1004.
+      # ============================================================
+      - name: Restore ChromeTabs project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Restoring ChromeTabs project"
+          Write-Host "========================================"
+
+          $chromeTabsProject = ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj"
+          $assetsFile = ".\ChromeTabs\FluentChromeTabs\obj\project.assets.json"
+
+          if (-not (Test-Path $chromeTabsProject)) {
+            throw "ChromeTabs project was not found: $chromeTabsProject"
+          }
+
+          dotnet restore $chromeTabsProject --verbosity normal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "ChromeTabs restore failed."
+          }
+
+          if (-not (Test-Path $assetsFile)) {
+            throw "ChromeTabs restore completed but project.assets.json was not created: $assetsFile"
+          }
+
+          Write-Host ""
+          Write-Host "[OK] ChromeTabs NuGet restore completed."
+          Write-Host "[OK] project.assets.json exists."
+
+
+      # ============================================================
+      # 6. Initialize and update submodules
       # ============================================================
 
       - name: Initialize submodules (latest remote HEAD)
@@ -157,7 +253,7 @@ jobs:
 
 
       # ============================================================
-      # 5. Install NSIS
+      # 7. Install NSIS
       # ============================================================
 
       - name: Install NSIS
@@ -179,7 +275,7 @@ jobs:
 
 
       # ============================================================
-      # 6. Locate MSBuild
+      # 8. Locate MSBuild
       # ============================================================
 
       - name: Locate MSBuild
@@ -230,7 +326,7 @@ jobs:
 
 
       # ============================================================
-      # 7. Install NuGet CLI
+      # 9. Install NuGet CLI
       # ============================================================
 
       - name: Install NuGet CLI
@@ -262,7 +358,7 @@ jobs:
 
 
       # ============================================================
-      # 8. Restore all NuGet packages
+      # 10. Restore all NuGet packages
       # ============================================================
 
       - name: Restore NuGet packages
@@ -523,6 +619,13 @@ jobs:
           $requiredFiles = @(
 
             # ------------------------------------------------------
+            # ChromeTabs external dependency
+            # ------------------------------------------------------
+
+            ".\ChromeTabs\FluentChromeTabs\FluentChromeTabs.csproj",
+            ".\ChromeTabs\FluentChromeTabs\obj\project.assets.json",
+
+            # ------------------------------------------------------
             # Main solution packages
             # ------------------------------------------------------
 
@@ -651,7 +754,56 @@ jobs:
 
 
       # ============================================================
-      # 9. Build installer
+      # 11. Install vue-frontend npm dependencies
+      #
+      # KitveiHakodesh.targets runs `npm run build` (vue-tsc) during
+      # the MSBuild build, but a fresh runner has no node_modules.
+      # Without this step the build fails with:
+      #
+      #   'vue-tsc' is not recognized as an internal or external command
+      # ============================================================
+      - name: Install vue-frontend npm dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Installing vue-frontend npm dependencies"
+          Write-Host "========================================"
+
+          $vueProjectDir = ".\KitveiHakodesh\vue-frontend"
+
+          if (-not (Test-Path "$vueProjectDir\package.json")) {
+            throw "vue-frontend package.json not found: $vueProjectDir"
+          }
+
+          Push-Location $vueProjectDir
+
+          try {
+            Write-Host ""
+            Write-Host "Node: $(node --version)"
+            Write-Host "npm:  $(npm --version)"
+
+            npm ci
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "npm ci failed with exit code $LASTEXITCODE"
+            }
+
+            if (-not (Test-Path ".\node_modules\vue-tsc")) {
+              throw "vue-tsc was not installed by npm ci"
+            }
+
+            Write-Host ""
+            Write-Host "[OK] vue-frontend npm dependencies installed."
+          }
+          finally {
+            Pop-Location
+          }
+
+
+      # ============================================================
+      # 12. Build installer
       # ============================================================
 
       - name: Build installer
@@ -677,7 +829,7 @@ jobs:
 
 
       # ============================================================
-      # 10. Publish GitHub release
+      # 13. Publish GitHub release
       # ============================================================
 
       - name: Publish fork release
