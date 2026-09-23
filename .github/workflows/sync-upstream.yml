@@ -322,6 +322,17 @@ jobs:
               -Encoding utf8 `
               -Append
 
+          # Also expose MSBuild on PATH for later steps: Find-MSBuild in
+          # Build\scripts\build-helpers.ps1 resolves msbuild via
+          # Get-Command first, and its hardcoded candidate list does not
+          # cover VS18\Enterprise (the hosted runner's edition) — which
+          # otherwise breaks the KitveiHakodeshDemoApp build.
+          Split-Path -Path $msbuild |
+            Out-File `
+              -FilePath $env:GITHUB_PATH `
+              -Encoding utf8 `
+              -Append
+
           Write-Host "[OK] MSBuild configured."
 
 
