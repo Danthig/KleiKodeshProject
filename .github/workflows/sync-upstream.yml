@@ -803,7 +803,71 @@ jobs:
 
 
       # ============================================================
-      # 12. Build installer
+      # 12. Import build signing certificate
+      #
+      # KleiKodeshVsto.csproj signs its ClickOnce manifests
+      # (SignManifests=true) using the certificate identified by
+      # ManifestCertificateThumbprint. That certificate (and the
+      # gitignored *.pfx key file) exists only on the local build
+      # machine, so without this step MSBuild fails with MSB3323:
+      #
+      #   Unable to find manifest signing certificate in the
+      #   certificate store.
+      #
+      # The certificate + private key are stored in the
+      # BUILD_SIGNING_PFX_B64 / BUILD_SIGNING_PFX_PASSWORD
+      # repository secrets and are re-imported on every run.
+      # ============================================================
+      - name: Import build signing certificate
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.BUILD_SIGNING_PFX_B64 }}
+          PFX_PASSWORD: ${{ secrets.BUILD_SIGNING_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "Importing build signing certificate"
+          Write-Host "========================================"
+
+          $expectedThumbprint = "9222AB03C319646619DABBAAFA3CC033EEFD42E0"
+          $runnerPfx = Join-Path $env:RUNNER_TEMP "KleiKodesh_TemporaryKey.pfx"
+          $projectPfx = ".\KleiKodeshVsto\KleiKodesh_TemporaryKey.pfx"
+
+          if ([string]::IsNullOrWhiteSpace($env:PFX_B64)) {
+            throw "Secret BUILD_SIGNING_PFX_B64 is empty or missing."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) {
+            throw "Secret BUILD_SIGNING_PFX_PASSWORD is empty or missing."
+          }
+
+          [IO.File]::WriteAllBytes($runnerPfx, [Convert]::FromBase64String($env:PFX_B64))
+
+          $securePwd = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+
+          $imported = Import-PfxCertificate `
+            -FilePath $runnerPfx `
+            -Password $securePwd `
+            -CertStoreLocation "Cert:\CurrentUser\My"
+
+          if ($imported.Thumbprint -ne $expectedThumbprint) {
+            throw "Imported certificate thumbprint $($imported.Thumbprint) does not match expected $expectedThumbprint."
+          }
+
+          # Also place the key file where the project expects it
+          # (ManifestKeyFile=KleiKodesh_TemporaryKey.pfx, gitignored).
+          Copy-Item $runnerPfx $projectPfx -Force
+
+          Write-Host ""
+          Write-Host "[OK] Certificate imported: $($imported.Subject)"
+          Write-Host "[OK] Thumbprint: $($imported.Thumbprint)"
+          Write-Host "[OK] Expires: $($imported.NotAfter)"
+          Write-Host "[OK] Key file written: $projectPfx"
+
+
+      # ============================================================
+      # 13. Build installer
       # ============================================================
 
       - name: Build installer
@@ -829,7 +893,7 @@ jobs:
 
 
       # ============================================================
-      # 13. Publish GitHub release
+      # 14. Publish GitHub release
       # ============================================================
 
       - name: Publish fork release
