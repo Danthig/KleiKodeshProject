@@ -311,6 +311,12 @@ jobs:
           git submodule update --init --recursive --checkout --force
 
           if ($LASTEXITCODE -ne 0) {
+            Write-Host ""
+            Write-Host "Submodule resolution failed while checking out the exact gitlink commits from the synchronized tree." -ForegroundColor Red
+            Write-Host "This means one or more submodule commits are not available from their configured remotes." -ForegroundColor Red
+            Write-Host "The workflow is stopping before build or release publication to avoid publishing a partially synchronized tree." -ForegroundColor Red
+            Write-Host ""
+            git submodule status --recursive 2>$null | ForEach-Object { Write-Host $_ }
             throw "git submodule update failed with exit code $LASTEXITCODE"
           }
 
