@@ -33,7 +33,7 @@ jobs:
       # 2. Configure upstream and determine latest release
       # ============================================================
 
-      - name: Configure upstream remote
+      - name: Determine latest upstream release and skip already processed versions
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -41,12 +41,18 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "========================================"
-          Write-Host "Configuring upstream repository"
+          Write-Host "Checking upstream release and fork sync state"
           Write-Host "========================================"
 
-          git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
+          try {
+            git remote get-url upstream | Out-Null
+          }
+          catch {
+            git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
+          }
 
-          Write-Host "Checking latest upstream release..."
+          git fetch upstream --tags --force
+          git fetch origin --tags --force
 
           $release = Invoke-RestMethod `
             -Uri "https://api.github.com/repos/KleiKodesh/KleiKodeshProject/releases/latest" `
@@ -56,74 +62,121 @@ jobs:
               "Accept" = "application/vnd.github+json"
             }
 
+          if ($null -eq $release -or [string]::IsNullOrWhiteSpace($release.tag_name)) {
+            throw "Upstream releases API did not return a tag_name."
+          }
+
           if ($release.tag_name -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid upstream release tag: $($release.tag_name)"
           }
 
+          $upstreamTag = $release.tag_name
+          $syncMarkerTag = "sync/$upstreamTag"
+
           Write-Host ""
           Write-Host "Latest upstream release:"
-          Write-Host $release.tag_name
+          Write-Host $upstreamTag
 
-          "UPSTREAM_RELEASE=$($release.tag_name)" |
+          "UPSTREAM_RELEASE=$upstreamTag" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
               -Encoding utf8
 
           Write-Host ""
-          Write-Host "Fetching upstream release tag..."
+          Write-Host "Fetching exact upstream tag into a dedicated ref..."
 
           git fetch upstream `
-            "refs/tags/$($release.tag_name):refs/tags/upstream-release"
+            "refs/tags/$upstreamTag:refs/tags/upstream-$upstreamTag" `
+            --force
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to fetch upstream release tag."
+            throw "Failed to fetch upstream release tag $upstreamTag."
           }
 
-          Write-Host "[OK] Upstream release fetched."
+          $alreadyReleased = $false
+          gh release view `
+            $upstreamTag `
+            --repo "${{ github.repository }}" `
+            2>$null | Out-Null
+
+          if ($LASTEXITCODE -eq 0) {
+            $alreadyReleased = $true
+          }
+
+          $markerExists = $false
+          $markerOutput = git ls-remote --tags origin "refs/tags/$syncMarkerTag" 2>$null
+          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($markerOutput)) {
+            $markerExists = $true
+          }
+
+          $forkAlreadyContainsTag = $false
+          git rev-parse --verify --quiet "refs/tags/$upstreamTag" | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            git merge-base --is-ancestor "refs/tags/$upstreamTag" HEAD
+            if ($LASTEXITCODE -eq 0) {
+              $forkAlreadyContainsTag = $true
+            }
+          }
+
+          if ($alreadyReleased -or $markerExists -or $forkAlreadyContainsTag) {
+            Write-Host ""
+            Write-Host "Upstream release $upstreamTag has already been synchronized into the fork. Nothing to do."
+            if ($alreadyReleased) {
+              Write-Host "Reason: GitHub release $upstreamTag already exists in the fork."
+            }
+            elseif ($markerExists) {
+              Write-Host "Reason: sync marker tag $syncMarkerTag already exists in the fork."
+            }
+            else {
+              Write-Host "Reason: the exact upstream tag already exists in the fork history."
+            }
+            exit 0
+          }
+
+          Write-Host "[OK] Upstream release $upstreamTag is new for this fork."
 
 
       # ============================================================
       # 3. Merge upstream release into fork
       # ============================================================
 
-      - name: Merge upstream changes
+      - name: Merge upstream release into fork while preserving custom history
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "========================================"
-          Write-Host "Merging upstream release"
+          Write-Host "Merging upstream release into fork"
           Write-Host "========================================"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          Write-Host "Merging upstream release $env:UPSTREAM_RELEASE..."
+          $syncBranch = "sync/$env:UPSTREAM_RELEASE"
 
-          git merge --no-edit upstream-release
+          Write-Host "Creating synchronized working branch from fork master..."
+          git checkout -B $syncBranch origin/master
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create working branch $syncBranch from origin/master."
+          }
+
+          Write-Host "Merging exact upstream release $env:UPSTREAM_RELEASE into the fork history..."
+          git merge --no-ff --no-edit "upstream-$env:UPSTREAM_RELEASE"
 
           if ($LASTEXITCODE -ne 0) {
             git merge --abort
 
             Write-Host ""
-            Write-Host "Merge conflict detected." -ForegroundColor Red
-            Write-Host "The release will not be built." -ForegroundColor Red
-
+            Write-Host "Merge conflict detected while applying $env:UPSTREAM_RELEASE to the fork tree." -ForegroundColor Red
+            Write-Host "The workflow is stopping before building so the fork is not left in a partially merged state." -ForegroundColor Red
             exit 1
           }
 
-          Write-Host "[OK] Upstream merge completed."
+          Write-Host "[OK] Upstream merge completed on working branch $syncBranch."
 
           Write-Host ""
-          Write-Host "Pushing merged master to fork..."
-
-          git push origin HEAD:master
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to push merged master to origin."
-          }
-
-          Write-Host "[OK] Fork master updated."
+          Write-Host "Local merge tree is ready for submodule verification and build."
 
 
       # ============================================================
@@ -226,13 +279,13 @@ jobs:
       # 6. Initialize and update submodules
       # ============================================================
 
-      - name: Initialize submodules (latest remote HEAD)
+      - name: Initialize submodules to the exact synced gitlinks
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "========================================"
-          Write-Host "Synchronizing submodules"
+          Write-Host "Synchronizing submodules to the exact gitlinks in the synced tree"
           Write-Host "========================================"
 
           git submodule sync --recursive
@@ -241,15 +294,24 @@ jobs:
             throw "git submodule sync failed with exit code $LASTEXITCODE"
           }
 
-          Write-Host "Updating submodules to latest remote commits..."
+          Write-Host "Checking out each submodule at the commit recorded in the merged tree..."
 
-          git submodule update --init --recursive --remote
+          git submodule update --init --recursive --checkout --force
 
           if ($LASTEXITCODE -ne 0) {
             throw "git submodule update failed with exit code $LASTEXITCODE"
           }
 
-          Write-Host "[OK] Submodules initialized and updated."
+          $submoduleStatus = git submodule status --recursive
+
+          foreach ($line in $submoduleStatus) {
+            if ($line.StartsWith("+") -or $line.StartsWith("-")) {
+              throw "Submodule mismatch detected in workspace: $line. The tree is not synchronized to the exact recorded gitlink commit."
+            }
+          }
+
+          Write-Host "[OK] Submodules match the exact gitlink commit state from the synchronized tree."
+          $submoduleStatus | ForEach-Object { Write-Host $_ }
 
 
       # ============================================================
@@ -976,6 +1038,7 @@ jobs:
 
           $version = $env:UPSTREAM_RELEASE
           $releaseDir = "Build/releases"
+          $syncMarkerTag = "sync/$version"
 
           Write-Host "========================================"
           Write-Host "Preparing release $version"
@@ -997,46 +1060,34 @@ jobs:
             Write-Host "[OK] Found asset: $asset"
           }
 
-
-          # --------------------------------------------------------
-          # Check whether release already exists
-          # --------------------------------------------------------
-
           Write-Host ""
-          Write-Host "Checking whether release $version already exists..."
+          Write-Host "Checking whether the fork release already exists for $version..."
 
           gh release view `
             $version `
-            --repo "${{ github.repository }}"
+            --repo "${{ github.repository }}" `
+            2>$null | Out-Null
 
           if ($LASTEXITCODE -eq 0) {
-
             Write-Host ""
-            Write-Host "Existing release found. Deleting it..."
-
-            gh release delete `
-              $version `
-              --repo "${{ github.repository }}" `
-              --yes `
-              --cleanup-tag
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to delete existing release $version"
-            }
-
-          }
-          else {
-
-            Write-Host "No existing release found."
+            Write-Host "Existing release $version already exists in the fork. Nothing to do."
+            exit 0
           }
 
+          Write-Host "No existing GitHub release found. Creating the fork release..."
 
-          # --------------------------------------------------------
-          # Create release
-          # --------------------------------------------------------
+          git push origin HEAD:master
 
-          Write-Host ""
-          Write-Host "Creating release $version..."
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to push the synchronized master branch to origin."
+          }
+
+          git tag -a $syncMarkerTag -m "Sync marker for upstream $version"
+          git push origin "refs/tags/$syncMarkerTag"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to push sync marker tag $syncMarkerTag to origin."
+          }
 
           gh release create `
             $version `
