@@ -1,0 +1,10 @@
+diff --git a/DocumentLocator.Service/DocumentLocator.Service.csproj b/DocumentLocator.Service/DocumentLocator.Service.csproj
+index ad38b30..611f1ba 100644
+--- a/DocumentLocator.Service/DocumentLocator.Service.csproj
++++ b/DocumentLocator.Service/DocumentLocator.Service.csproj
+@@ -146 +146 @@
+-    <EmbeddedResource Include="..\packages\System.Runtime.CompilerServices.Unsafe.4.3.0\lib\netstandard1.0\System.Runtime.CompilerServices.Unsafe.dll">
++    <EmbeddedResource Include="..\..\..\..\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll">
+@@ -149 +149 @@
+-    <EmbeddedResource Include="..\packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll">
++    <EmbeddedResource Include="..\..\..\..\packages\System.ValueTuple.4.6.1\lib\net47\System.ValueTuple.dll">

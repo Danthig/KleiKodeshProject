@@ -37,6 +37,7 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -47,8 +48,15 @@ jobs:
           git remote remove upstream 2>$null
           git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
 
-          git fetch upstream --tags --force
-          git fetch origin --tags --force
+          git fetch upstream "+refs/tags/*:refs/upstream/tags/*" --force
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to fetch upstream tags."
+          }
+
+          git fetch origin "+refs/tags/*:refs/fork/tags/*" --force
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to fetch fork tags."
+          }
 
           $release = Invoke-RestMethod `
             -Uri "https://api.github.com/repos/KleiKodesh/KleiKodeshProject/releases/latest" `
@@ -67,7 +75,6 @@ jobs:
           }
 
           $upstreamTag = $release.tag_name
-          $syncMarkerTag = "sync/$upstreamTag"
 
           Write-Host ""
           Write-Host "Latest upstream release:"
@@ -81,57 +88,104 @@ jobs:
           Write-Host ""
           Write-Host "Fetching exact upstream tag into a dedicated ref..."
 
-          git fetch upstream "tag" $upstreamTag --force
-          git tag -f "upstream-$upstreamTag" "$upstreamTag"
-
+          git fetch upstream "refs/tags/${upstreamTag}:refs/upstream/tags/${upstreamTag}" --force
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to fetch upstream release tag $upstreamTag."
           }
 
-          $alreadyReleased = $false
-          gh release view `
-            $upstreamTag `
-            --repo "${{ github.repository }}" `
-            2>$null | Out-Null
+          $releaseCommit = (git rev-parse "refs/upstream/tags/$upstreamTag^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseCommit)) {
+            throw "Could not resolve upstream release tag $upstreamTag to a commit."
+          }
 
-          if ($LASTEXITCODE -eq 0) {
+          $submodulePath = "KitveiHakodesh/CSharpBackend/DocumentLocator"
+          $submoduleEntry = git ls-tree $releaseCommit -- $submodulePath
+          if ($LASTEXITCODE -ne 0 -or $submoduleEntry -notmatch '^160000 commit ([0-9a-f]{40})\s') {
+            throw "Upstream release $upstreamTag does not contain the expected DocumentLocator submodule gitlink."
+          }
+
+          $upstreamDocumentLocatorSha = $Matches[1]
+          "UPSTREAM_DOCUMENTLOCATOR_SHA=$upstreamDocumentLocatorSha" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $alreadyReleased = $false
+          $releaseUri = "https://api.github.com/repos/${{ github.repository }}/releases/tags/$upstreamTag"
+          try {
+            $forkRelease = Invoke-RestMethod `
+              -Uri $releaseUri `
+              -Headers @{
+                "User-Agent" = "KleiKodesh-ForkSync"
+                "Authorization" = "Bearer $env:GITHUB_TOKEN"
+                "Accept" = "application/vnd.github+json"
+              }
             $alreadyReleased = $true
           }
+          catch {
+            $statusCode = 0
+            if ($null -ne $_.Exception.Response) {
+              $statusCode = [int]$_.Exception.Response.StatusCode
+            }
 
-          $markerExists = $false
-          $markerOutput = git ls-remote --tags origin "refs/tags/$syncMarkerTag" 2>$null
-          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($markerOutput)) {
-            $markerExists = $true
-          }
-
-          $mergeAlreadyApplied = $false
-          git rev-parse --verify --quiet "refs/tags/upstream-$upstreamTag" | Out-Null
-          if ($LASTEXITCODE -eq 0) {
-            git merge-base --is-ancestor "refs/tags/upstream-$upstreamTag" HEAD
-            if ($LASTEXITCODE -eq 0) {
-              $mergeAlreadyApplied = $true
+            if ($statusCode -ne 404) {
+              throw "Could not determine whether fork release $upstreamTag exists: $($_.Exception.Message)"
             }
           }
 
           if ($alreadyReleased) {
+            if ($forkRelease.tag_name -ne $upstreamTag) {
+              throw "The fork release API returned tag $($forkRelease.tag_name) for requested release $upstreamTag."
+            }
+
+            $publishedCommit = git rev-parse --verify --quiet "refs/fork/tags/$upstreamTag^{commit}"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Fork release $upstreamTag exists, but its tag does not resolve locally. Refusing to mark it complete."
+            }
+
+            $publishedCommit = $publishedCommit.Trim()
+            $publishedGitlink = git ls-tree $publishedCommit -- $submodulePath
+            if ($publishedGitlink -notmatch "^160000 commit $upstreamDocumentLocatorSha\s") {
+              throw "Fork release $upstreamTag does not point to the upstream release's exact DocumentLocator gitlink."
+            }
+
+            git merge-base --is-ancestor "refs/upstream/tags/$upstreamTag" $publishedCommit
+            if ($LASTEXITCODE -ne 0) {
+              throw "Fork release $upstreamTag does not contain the exact upstream release commit."
+            }
+
             Write-Host ""
-            Write-Host "GitHub release $upstreamTag already exists in the fork. Nothing to do."
+            Write-Host "GitHub release $upstreamTag is verified at $publishedCommit. Nothing to do."
             exit 0
           }
 
-          if ($markerExists -and $alreadyReleased) {
-            Write-Host ""
-            Write-Host "Sync marker $syncMarkerTag exists and the release already exists in the fork. Nothing to do."
-            exit 0
-          }
+          $forkTagCommit = git rev-parse --verify --quiet "refs/fork/tags/$upstreamTag^{commit}" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $forkTagCommit = $forkTagCommit.Trim()
+            $forkMasterCommit = (git rev-parse refs/remotes/origin/master).Trim()
 
-          if ($mergeAlreadyApplied) {
-            Write-Host ""
-            Write-Host "The upstream merge for $upstreamTag is already present in the current branch, but the release is missing. Continuing with build/publish."
+            git merge-base --is-ancestor $forkTagCommit $forkMasterCommit
+            if ($LASTEXITCODE -ne 0) {
+              throw "Fork tag $upstreamTag points to $forkTagCommit, which is not in origin/master history. Refusing to reuse or move the tag."
+            }
+
+            $forkTagSubmoduleEntry = git ls-tree $forkTagCommit -- $submodulePath
+            if ($forkTagSubmoduleEntry -notmatch "^160000 commit $upstreamDocumentLocatorSha\s") {
+              throw "Fork tag $upstreamTag points to a tree whose DocumentLocator gitlink does not match upstream release $upstreamTag ($upstreamDocumentLocatorSha). Refusing to rebuild or republish this tag."
+            }
+
+            git merge-base --is-ancestor "refs/upstream/tags/$upstreamTag" $forkTagCommit
+            if ($LASTEXITCODE -ne 0) {
+              throw "Fork tag $upstreamTag does not contain upstream release commit $releaseCommit."
+            }
+
+            "FORK_EXISTING_RELEASE_TAG_COMMIT=$forkTagCommit" |
+              Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
           else {
-            Write-Host "[OK] Upstream release $upstreamTag is new for this fork and not yet merged."
+            "FORK_EXISTING_RELEASE_TAG_COMMIT=" |
+              Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
+
+          Write-Host "[OK] Upstream release $upstreamTag and its exact DocumentLocator gitlink are verified."
 
 
       # ============================================================
@@ -151,44 +205,103 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           $syncBranch = "sync/$env:UPSTREAM_RELEASE"
-          $mergeAlreadyApplied = $false
+          $submodulePath = "KitveiHakodesh/CSharpBackend/DocumentLocator"
+          $patchSource = "Build/patches/DocumentLocator-fork-dependency-paths.patch"
+          $patchForBuild = Join-Path $env:RUNNER_TEMP "DocumentLocator-fork-dependency-paths.patch"
 
-          git rev-parse --verify --quiet "refs/tags/upstream-$env:UPSTREAM_RELEASE" | Out-Null
+          if (-not (Test-Path $patchSource)) {
+            throw "Fork-specific DocumentLocator build patch is missing: $patchSource"
+          }
+
+          Copy-Item $patchSource $patchForBuild -Force
+
+          Write-Host "Creating synchronized working branch from fork master..."
+          git checkout -B $syncBranch origin/master
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create working branch $syncBranch from origin/master."
+          }
+
+          $mergeAlreadyApplied = $false
+            git merge-base --is-ancestor "refs/upstream/tags/$env:UPSTREAM_RELEASE" HEAD
           if ($LASTEXITCODE -eq 0) {
-            git merge-base --is-ancestor "refs/tags/upstream-$env:UPSTREAM_RELEASE" HEAD
-            if ($LASTEXITCODE -eq 0) {
-              $mergeAlreadyApplied = $true
-            }
+            $mergeAlreadyApplied = $true
           }
 
           if ($mergeAlreadyApplied) {
-            Write-Host "The upstream merge for $env:UPSTREAM_RELEASE is already present on this branch. Skipping redundant merge."
+            Write-Host "The exact upstream release is already in origin/master. Continuing with dependency verification and build."
           }
           else {
-            Write-Host "Creating synchronized working branch from fork master..."
-            git checkout -B $syncBranch origin/master
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to create working branch $syncBranch from origin/master."
-            }
-
             Write-Host "Merging exact upstream release $env:UPSTREAM_RELEASE into the fork history..."
-            git merge --no-ff --no-edit "upstream-$env:UPSTREAM_RELEASE"
+            git merge --no-ff --no-edit "refs/upstream/tags/$env:UPSTREAM_RELEASE"
+            $mergeExitCode = $LASTEXITCODE
 
-            if ($LASTEXITCODE -ne 0) {
+            if ($mergeExitCode -ne 0) {
+              $conflicts = git diff --name-only --diff-filter=U
+              Write-Host "Merge conflicts detected in:" -ForegroundColor Red
+              $conflicts | ForEach-Object { Write-Host " - $_" -ForegroundColor Red }
               git merge --abort
 
-              Write-Host ""
-              Write-Host "Merge conflict detected while applying $env:UPSTREAM_RELEASE to the fork tree." -ForegroundColor Red
-              Write-Host "The workflow is stopping before building so the fork is not left in a partially merged state." -ForegroundColor Red
-              exit 1
+              throw "Merge of upstream release $env:UPSTREAM_RELEASE failed with exit code $mergeExitCode. No conflict resolution was attempted."
             }
 
             Write-Host "[OK] Upstream merge completed on working branch $syncBranch."
           }
 
+          Write-Host "Verifying the release-pinned DocumentLocator gitlink..."
+          $gitlinkLine = git ls-tree HEAD -- $submodulePath
+          if ($LASTEXITCODE -ne 0 -or $gitlinkLine -notmatch '^160000 commit ([0-9a-f]{40})\s') {
+            throw "The synchronized tree does not contain a valid DocumentLocator gitlink."
+          }
+
+          $currentGitlinkSha = $Matches[1]
+          if ($currentGitlinkSha -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
+            Write-Host "Updating the fork gitlink from $currentGitlinkSha to the exact upstream release commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
+            git update-index --cacheinfo "160000,$env:UPSTREAM_DOCUMENTLOCATOR_SHA,$submodulePath"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to stage the release-pinned DocumentLocator gitlink."
+            }
+          }
+
+          git submodule update --init --recursive --checkout --force -- $submodulePath
+          $submoduleUpdateExitCode = $LASTEXITCODE
+          if ($submoduleUpdateExitCode -ne 0) {
+            throw "Could not fetch exact DocumentLocator commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA (exit code $submoduleUpdateExitCode). No remote HEAD fallback is permitted."
+          }
+
+          $resolvedGitlinkSha = (git -C $submodulePath rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $resolvedGitlinkSha -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
+            throw "DocumentLocator resolved to $resolvedGitlinkSha instead of the release-pinned commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
+          }
+
+          git add -- $submodulePath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to stage the resolved DocumentLocator gitlink."
+          }
+
+          git diff --cached --quiet -- $submodulePath
+          $gitlinkDiffExitCode = $LASTEXITCODE
+          if ($gitlinkDiffExitCode -eq 1) {
+            git commit -m "Pin DocumentLocator to upstream $env:UPSTREAM_RELEASE"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to commit the verified release-pinned DocumentLocator gitlink."
+            }
+          }
+          elseif ($gitlinkDiffExitCode -ne 0) {
+            throw "Could not verify the staged DocumentLocator gitlink (exit code $gitlinkDiffExitCode)."
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:FORK_EXISTING_RELEASE_TAG_COMMIT)) {
+            $tagTree = (git rev-parse "$env:FORK_EXISTING_RELEASE_TAG_COMMIT^{tree}").Trim()
+            $buildTree = (git rev-parse "HEAD^{tree}").Trim()
+            if ($LASTEXITCODE -ne 0 -or $tagTree -ne $buildTree) {
+              throw "Existing tag $env:UPSTREAM_RELEASE does not point to the exact synchronized tree being built. Refusing to reuse or move the tag."
+            }
+          }
+
           Write-Host ""
-          Write-Host "Local merge tree is ready for submodule verification and build."
+          Write-Host "Local merge tree and exact dependencies are ready for build."
 
 
       # ============================================================
@@ -215,6 +328,7 @@ jobs:
           Write-Host "========================================"
 
           $chromeTabsPath = ".\ChromeTabs"
+          $chromeTabsCommit = "749a706ecaa1a6ac3c71bb187b996590ccb96386"
 
           if (Test-Path $chromeTabsPath) {
             Write-Host "Removing existing ChromeTabs directory..."
@@ -226,12 +340,22 @@ jobs:
           }
 
           git clone `
-            --depth 1 `
+            --no-checkout `
             https://github.com/KleiKodesh/EasyTabs.git `
             $chromeTabsPath
 
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to clone KleiKodesh/EasyTabs."
+          }
+
+          git -C $chromeTabsPath checkout --detach $chromeTabsCommit
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to check out pinned EasyTabs commit $chromeTabsCommit."
+          }
+
+          $resolvedChromeTabsCommit = (git -C $chromeTabsPath rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $resolvedChromeTabsCommit -ne $chromeTabsCommit) {
+            throw "EasyTabs resolved to $resolvedChromeTabsCommit instead of pinned commit $chromeTabsCommit."
           }
 
           $chromeTabsProject =
@@ -243,6 +367,7 @@ jobs:
 
           Write-Host ""
           Write-Host "[OK] ChromeTabs repository cloned."
+          Write-Host "[OK] EasyTabs pinned commit: $resolvedChromeTabsCommit"
           Write-Host "[OK] FluentChromeTabs.csproj found."
           Write-Host $chromeTabsProject
 
@@ -288,10 +413,10 @@ jobs:
 
 
       # ============================================================
-      # 6. Initialize and update submodules
+      # 6. Verify release-pinned submodules
       # ============================================================
 
-      - name: Initialize submodules to the exact synced gitlinks
+      - name: Verify submodules against exact release gitlinks
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -309,15 +434,16 @@ jobs:
           Write-Host "Checking out each submodule at the commit recorded in the merged tree..."
 
           git submodule update --init --recursive --checkout --force
+          $submoduleUpdateExitCode = $LASTEXITCODE
 
-          if ($LASTEXITCODE -ne 0) {
+          if ($submoduleUpdateExitCode -ne 0) {
             Write-Host ""
             Write-Host "Submodule resolution failed while checking out the exact gitlink commits from the synchronized tree." -ForegroundColor Red
             Write-Host "This means one or more submodule commits are not available from their configured remotes." -ForegroundColor Red
             Write-Host "The workflow is stopping before build or release publication to avoid publishing a partially synchronized tree." -ForegroundColor Red
             Write-Host ""
             git submodule status --recursive 2>$null | ForEach-Object { Write-Host $_ }
-            throw "git submodule update failed with exit code $LASTEXITCODE"
+            throw "git submodule update failed with exit code $submoduleUpdateExitCode"
           }
 
           $submoduleStatus = git submodule status --recursive
@@ -330,6 +456,35 @@ jobs:
 
           Write-Host "[OK] Submodules match the exact gitlink commit state from the synchronized tree."
           $submoduleStatus | ForEach-Object { Write-Host $_ }
+
+          $documentLocatorPath = "KitveiHakodesh/CSharpBackend/DocumentLocator"
+          $documentLocatorCommit = (git -C $documentLocatorPath rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $documentLocatorCommit -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
+            throw "DocumentLocator resolved to $documentLocatorCommit instead of release-pinned commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
+          }
+
+          $patchForBuild = Join-Path $env:RUNNER_TEMP "DocumentLocator-fork-dependency-paths.patch"
+          if (-not (Test-Path $patchForBuild)) {
+            throw "Fork-specific DocumentLocator build patch is missing: $patchForBuild"
+          }
+
+          git -C $documentLocatorPath apply --check --unidiff-zero $patchForBuild
+          if ($LASTEXITCODE -ne 0) {
+            throw "Fork-specific DocumentLocator patch does not apply to release commit $documentLocatorCommit."
+          }
+
+          git -C $documentLocatorPath apply --unidiff-zero $patchForBuild
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to apply the fork-specific DocumentLocator build patch."
+          }
+
+          $patchedProject = Get-Content "$documentLocatorPath\DocumentLocator.Service\DocumentLocator.Service.csproj" -Raw
+          if ($patchedProject -notmatch [regex]::Escape("System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll") -or
+              $patchedProject -notmatch [regex]::Escape("System.ValueTuple.4.6.1\lib\net47\System.ValueTuple.dll")) {
+            throw "The fork-specific DocumentLocator dependency paths were not applied to the build source."
+          }
+
+          Write-Host "[OK] Fork-specific DocumentLocator dependency paths are applied to the build source."
 
 
       # ============================================================
@@ -345,7 +500,7 @@ jobs:
           Write-Host "Installing NSIS"
           Write-Host "========================================"
 
-          choco install nsis -y --no-progress
+          choco install nsis --version=3.12.0 -y --no-progress
 
           if ($LASTEXITCODE -ne 0) {
             throw "NSIS installation failed."
@@ -429,7 +584,7 @@ jobs:
           Write-Host "Installing NuGet CLI"
           Write-Host "========================================"
 
-          choco install nuget.commandline -y --no-progress
+          choco install nuget.commandline --version=7.9.0 -y --no-progress
 
           if ($LASTEXITCODE -ne 0) {
             throw "NuGet CLI installation failed."
@@ -1056,7 +1211,6 @@ jobs:
 
           $version = $env:UPSTREAM_RELEASE
           $releaseDir = "Build/releases"
-          $syncMarkerTag = "sync/$version"
 
           Write-Host "========================================"
           Write-Host "Preparing release $version"
@@ -1081,30 +1235,96 @@ jobs:
           Write-Host ""
           Write-Host "Checking whether the fork release already exists for $version..."
 
-          gh release view `
-            $version `
-            --repo "${{ github.repository }}" `
-            2>$null | Out-Null
+          $releaseExists = $false
+          $publishedRelease = $null
+          try {
+            $publishedRelease = Invoke-RestMethod `
+              -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$version" `
+              -Headers @{
+                "User-Agent" = "KleiKodesh-ForkSync"
+                "Authorization" = "Bearer $env:GH_TOKEN"
+                "Accept" = "application/vnd.github+json"
+              }
+            $releaseExists = $true
+          }
+          catch {
+            $statusCode = 0
+            if ($null -ne $_.Exception.Response) {
+              $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            if ($statusCode -ne 404) {
+              throw "Could not determine whether release $version exists: $($_.Exception.Message)"
+            }
+          }
 
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host ""
-            Write-Host "Existing release $version already exists in the fork. Nothing to do."
+          if ($releaseExists) {
+            $publishedCommit = git rev-parse --verify --quiet "refs/fork/tags/$version^{commit}"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $version exists, but its fork tag does not resolve to a commit. Refusing to claim it is valid."
+            }
+
+            $publishedCommit = $publishedCommit.Trim()
+            $publishedGitlink = git ls-tree $publishedCommit -- "KitveiHakodesh/CSharpBackend/DocumentLocator"
+            if ($publishedGitlink -notmatch "^160000 commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA\s") {
+              throw "Existing release $version points to a tree with a DocumentLocator gitlink different from upstream ($env:UPSTREAM_DOCUMENTLOCATOR_SHA). No changes were made."
+            }
+
+            git merge-base --is-ancestor "refs/upstream/tags/$version" $publishedCommit
+            if ($LASTEXITCODE -ne 0) {
+              throw "Existing release $version does not contain the exact upstream release commit. No changes were made."
+            }
+
+            if ($publishedRelease.tag_name -ne $version -or $publishedRelease.draft -or $publishedRelease.prerelease) {
+              throw "Existing release $version is not a published stable release for that exact tag."
+            }
+
+            Write-Host "Existing release $version is verified at commit $publishedCommit. Nothing to do."
             exit 0
           }
 
-          Write-Host "No existing GitHub release found. Creating the fork release..."
+          Write-Host "No existing GitHub release found. Publishing the verified build..."
+
+          $syncCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($syncCommit)) {
+            throw "Could not resolve the synchronized build commit."
+          }
+
+          $existingForkTag = git rev-parse --verify --quiet "refs/fork/tags/$version^{commit}" 2>$null
+          $tagAlreadyExists = $LASTEXITCODE -eq 0
+          if ($tagAlreadyExists) {
+            $releaseTargetCommit = $existingForkTag.Trim()
+            $existingTagTree = (git rev-parse "$releaseTargetCommit^{tree}").Trim()
+            $syncTree = (git rev-parse "${syncCommit}^{tree}").Trim()
+            if ($LASTEXITCODE -ne 0 -or $existingTagTree -ne $syncTree) {
+              throw "Existing tag $version does not point to the exact synchronized tree that was built. Refusing to push master or move the tag."
+            }
+          }
+          else {
+            $releaseTargetCommit = $syncCommit
+          }
 
           git push origin HEAD:master
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to push the synchronized master branch to origin."
+            throw "Fast-forward push of synchronized commit $syncCommit to origin/master failed. No force push will be attempted."
           }
 
-          git tag -a $syncMarkerTag -m "Sync marker for upstream $version"
-          git push origin "refs/tags/$syncMarkerTag"
+          $pushedMaster = git ls-remote origin refs/heads/master
+          if ($LASTEXITCODE -ne 0 -or $pushedMaster -notmatch "^$syncCommit\s+refs/heads/master$") {
+            throw "origin/master does not resolve to synchronized commit $syncCommit after push."
+          }
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to push sync marker tag $syncMarkerTag to origin."
+          if (-not $tagAlreadyExists) {
+            git tag -a $version $releaseTargetCommit -m "KleiKodesh $version"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create release tag $version at $syncCommit."
+            }
+
+            git push origin "refs/tags/$version"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to push release tag $version. Existing tags will not be deleted or rewritten."
+            }
           }
 
           gh release create `
@@ -1113,13 +1333,50 @@ jobs:
             --repo "${{ github.repository }}" `
             --title "KleiKodesh $version" `
             --generate-notes `
-            --target master
+            --target $releaseTargetCommit
 
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to create GitHub release $version"
           }
 
+          $publishedTag = git ls-remote --tags origin "refs/tags/$version" "refs/tags/$version^{}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not verify published tag $version on origin."
+          }
+
+          $peeledTag = $publishedTag | Where-Object { $_ -match "\srefs/tags/$([regex]::Escape($version))\^\{\}$" } | Select-Object -First 1
+          if ($peeledTag) {
+            $publishedTagCommit = ($peeledTag -split '\s+')[0]
+          }
+          else {
+            $publishedTagCommit = ($publishedTag | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+          }
+
+          if ($publishedTagCommit -ne $releaseTargetCommit) {
+            throw "Published tag $version resolves to $publishedTagCommit instead of verified release target $releaseTargetCommit."
+          }
+
+          $publishedRelease = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/$version" `
+            -Headers @{
+              "User-Agent" = "KleiKodesh-ForkSync"
+              "Authorization" = "Bearer $env:GH_TOKEN"
+              "Accept" = "application/vnd.github+json"
+            }
+
+          if ($publishedRelease.tag_name -ne $version -or $publishedRelease.draft -or $publishedRelease.prerelease) {
+            throw "Published release verification failed for $version."
+          }
+
+          $publishedAssetNames = @($publishedRelease.assets | ForEach-Object { $_.name })
+          foreach ($asset in $assets) {
+            $expectedAssetName = [IO.Path]::GetFileName($asset)
+            if ($expectedAssetName -notin $publishedAssetNames) {
+              throw "Published release $version is missing asset $expectedAssetName."
+            }
+          }
+
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "Release $version published successfully."
+          Write-Host "Release $version verified at synchronized commit $syncCommit."
           Write-Host "========================================"
