@@ -109,31 +109,34 @@ jobs:
             $markerExists = $true
           }
 
-          $forkAlreadyContainsTag = $false
-          git rev-parse --verify --quiet "refs/tags/$upstreamTag" | Out-Null
+          $mergeAlreadyApplied = $false
+          git rev-parse --verify --quiet "refs/tags/upstream-$upstreamTag" | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            git merge-base --is-ancestor "refs/tags/$upstreamTag" HEAD
+            git merge-base --is-ancestor "refs/tags/upstream-$upstreamTag" HEAD
             if ($LASTEXITCODE -eq 0) {
-              $forkAlreadyContainsTag = $true
+              $mergeAlreadyApplied = $true
             }
           }
 
-          if ($alreadyReleased -or $markerExists -or $forkAlreadyContainsTag) {
+          if ($alreadyReleased) {
             Write-Host ""
-            Write-Host "Upstream release $upstreamTag has already been synchronized into the fork. Nothing to do."
-            if ($alreadyReleased) {
-              Write-Host "Reason: GitHub release $upstreamTag already exists in the fork."
-            }
-            elseif ($markerExists) {
-              Write-Host "Reason: sync marker tag $syncMarkerTag already exists in the fork."
-            }
-            else {
-              Write-Host "Reason: the exact upstream tag already exists in the fork history."
-            }
+            Write-Host "GitHub release $upstreamTag already exists in the fork. Nothing to do."
             exit 0
           }
 
-          Write-Host "[OK] Upstream release $upstreamTag is new for this fork."
+          if ($markerExists -and $alreadyReleased) {
+            Write-Host ""
+            Write-Host "Sync marker $syncMarkerTag exists and the release already exists in the fork. Nothing to do."
+            exit 0
+          }
+
+          if ($mergeAlreadyApplied) {
+            Write-Host ""
+            Write-Host "The upstream merge for $upstreamTag is already present in the current branch, but the release is missing. Continuing with build/publish."
+          }
+          else {
+            Write-Host "[OK] Upstream release $upstreamTag is new for this fork and not yet merged."
+          }
 
 
       # ============================================================
@@ -153,27 +156,41 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           $syncBranch = "sync/$env:UPSTREAM_RELEASE"
+          $mergeAlreadyApplied = $false
 
-          Write-Host "Creating synchronized working branch from fork master..."
-          git checkout -B $syncBranch origin/master
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to create working branch $syncBranch from origin/master."
+          git rev-parse --verify --quiet "refs/tags/upstream-$env:UPSTREAM_RELEASE" | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            git merge-base --is-ancestor "refs/tags/upstream-$env:UPSTREAM_RELEASE" HEAD
+            if ($LASTEXITCODE -eq 0) {
+              $mergeAlreadyApplied = $true
+            }
           }
 
-          Write-Host "Merging exact upstream release $env:UPSTREAM_RELEASE into the fork history..."
-          git merge --no-ff --no-edit "upstream-$env:UPSTREAM_RELEASE"
-
-          if ($LASTEXITCODE -ne 0) {
-            git merge --abort
-
-            Write-Host ""
-            Write-Host "Merge conflict detected while applying $env:UPSTREAM_RELEASE to the fork tree." -ForegroundColor Red
-            Write-Host "The workflow is stopping before building so the fork is not left in a partially merged state." -ForegroundColor Red
-            exit 1
+          if ($mergeAlreadyApplied) {
+            Write-Host "The upstream merge for $env:UPSTREAM_RELEASE is already present on this branch. Skipping redundant merge."
           }
+          else {
+            Write-Host "Creating synchronized working branch from fork master..."
+            git checkout -B $syncBranch origin/master
 
-          Write-Host "[OK] Upstream merge completed on working branch $syncBranch."
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create working branch $syncBranch from origin/master."
+            }
+
+            Write-Host "Merging exact upstream release $env:UPSTREAM_RELEASE into the fork history..."
+            git merge --no-ff --no-edit "upstream-$env:UPSTREAM_RELEASE"
+
+            if ($LASTEXITCODE -ne 0) {
+              git merge --abort
+
+              Write-Host ""
+              Write-Host "Merge conflict detected while applying $env:UPSTREAM_RELEASE to the fork tree." -ForegroundColor Red
+              Write-Host "The workflow is stopping before building so the fork is not left in a partially merged state." -ForegroundColor Red
+              exit 1
+            }
+
+            Write-Host "[OK] Upstream merge completed on working branch $syncBranch."
+          }
 
           Write-Host ""
           Write-Host "Local merge tree is ready for submodule verification and build."
