@@ -157,9 +157,10 @@ jobs:
             exit 0
           }
 
-          $forkTagCommit = git rev-parse --verify --quiet "refs/fork/tags/$upstreamTag^{commit}" 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            $forkTagCommit = $forkTagCommit.Trim()
+          git show-ref --verify --quiet "refs/fork/tags/$upstreamTag"
+          $forkTagExists = $LASTEXITCODE -eq 0
+          if ($forkTagExists) {
+            $forkTagCommit = (git rev-parse "refs/fork/tags/$upstreamTag^{commit}").Trim()
             $forkMasterCommit = (git rev-parse refs/remotes/origin/master).Trim()
 
             git merge-base --is-ancestor $forkTagCommit $forkMasterCommit
@@ -1294,10 +1295,10 @@ jobs:
             throw "Could not resolve the synchronized build commit."
           }
 
-          $existingForkTag = git rev-parse --verify --quiet "refs/fork/tags/$version^{commit}" 2>$null
+          git show-ref --verify --quiet "refs/fork/tags/$version"
           $tagAlreadyExists = $LASTEXITCODE -eq 0
           if ($tagAlreadyExists) {
-            $releaseTargetCommit = $existingForkTag.Trim()
+            $releaseTargetCommit = (git rev-parse "refs/fork/tags/$version^{commit}").Trim()
             $existingTagTree = (git rev-parse "$releaseTargetCommit^{tree}").Trim()
             $syncTree = (git rev-parse "${syncCommit}^{tree}").Trim()
             if ($LASTEXITCODE -ne 0 -or $existingTagTree -ne $syncTree) {
