@@ -1323,6 +1323,15 @@ jobs:
           }
 
           if (-not $tagAlreadyExists) {
+            # Remove any local checkout tag that may conflict. This only deletes
+            # the local refs/tags entry and does not affect remote tags on origin.
+            git show-ref --verify --quiet "refs/tags/$version"
+            if ($LASTEXITCODE -eq 0) {
+              git update-ref -d "refs/tags/$version"
+              if ($LASTEXITCODE -ne 0) {
+                throw "Failed to remove the local checkout tag $version before creating the fork release tag."
+              }
+            }
             git tag -a $version $releaseTargetCommit -m "KleiKodesh $version"
             if ($LASTEXITCODE -ne 0) {
               throw "Failed to create release tag $version at $syncCommit."
