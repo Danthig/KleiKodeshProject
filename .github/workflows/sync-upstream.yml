@@ -159,6 +159,7 @@ jobs:
 
           git show-ref --verify --quiet "refs/fork/tags/$upstreamTag"
           $forkTagExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
           if ($forkTagExists) {
             $forkTagCommit = (git rev-parse "refs/fork/tags/$upstreamTag^{commit}").Trim()
             $forkMasterCommit = (git rev-parse refs/remotes/origin/master).Trim()
@@ -1297,6 +1298,7 @@ jobs:
 
           git show-ref --verify --quiet "refs/fork/tags/$version"
           $tagAlreadyExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
           if ($tagAlreadyExists) {
             $releaseTargetCommit = (git rev-parse "refs/fork/tags/$version^{commit}").Trim()
             $existingTagTree = (git rev-parse "$releaseTargetCommit^{tree}").Trim()
