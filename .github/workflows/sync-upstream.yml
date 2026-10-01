@@ -44,12 +44,8 @@ jobs:
           Write-Host "Checking upstream release and fork sync state"
           Write-Host "========================================"
 
-          try {
-            git remote get-url upstream | Out-Null
-          }
-          catch {
-            git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
-          }
+          git remote remove upstream 2>$null
+          git remote add upstream https://github.com/KleiKodesh/KleiKodeshProject.git
 
           git fetch upstream --tags --force
           git fetch origin --tags --force
@@ -85,9 +81,8 @@ jobs:
           Write-Host ""
           Write-Host "Fetching exact upstream tag into a dedicated ref..."
 
-          git fetch upstream `
-            "refs/tags/$upstreamTag:refs/tags/upstream-$upstreamTag" `
-            --force
+          git fetch upstream "tag" $upstreamTag --force
+          git tag -f "upstream-$upstreamTag" "$upstreamTag"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to fetch upstream release tag $upstreamTag."
