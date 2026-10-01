@@ -8,7 +8,12 @@ import {
 import type { HebrewBook } from './hebrewBooksCatalog'
 import { wantsNewTab, withNewTabHint } from '@/composables/useOpenInNewTab'
 
-const props = defineProps<{ book: HebrewBook; focused?: boolean; hasLocalFile?: boolean }>()
+const props = defineProps<{
+  book: HebrewBook
+  focused?: boolean
+  hasLocalFile?: boolean
+  localFolderConfigured?: boolean
+}>()
 const emit = defineEmits<{
   'book-clicked': [book: HebrewBook, openInNewTab: boolean]
   'book-double-clicked': [book: HebrewBook]
@@ -62,7 +67,7 @@ const tooltip = computed(() => {
           <IconFolderOpen20Regular />
         </button>
         <button
-          v-if="hasLocalFile"
+          v-if="hasLocalFile && !localFolderConfigured"
           class="dl-btn delete-btn"
           :title="'מחק מהתיקייה: ' + book.title"
           tabindex="-1"
@@ -71,6 +76,7 @@ const tooltip = computed(() => {
           <IconDelete20Regular />
         </button>
         <button
+          v-if="!localFolderConfigured"
           class="dl-btn"
           :title="'הורד ' + book.title"
           tabindex="-1"

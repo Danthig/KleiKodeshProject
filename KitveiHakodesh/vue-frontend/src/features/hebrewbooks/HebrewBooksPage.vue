@@ -39,6 +39,7 @@ const {
 const searchInputRef = ref<HTMLInputElement>()
 const scrollEl = ref<HTMLElement | null>(null)
 let clickTimer: ReturnType<typeof setTimeout> | null = null
+let keyboardPreviewTimer: ReturnType<typeof setTimeout> | null = null
 
 const virtualizer = useVirtualizer(
   computed(() => ({
@@ -56,6 +57,27 @@ const { activeIndex, onKeydown: onSearchInputKeydown } = useInputListNavigation(
     virtualizer.value as unknown as import('@tanstack/vue-virtual').Virtualizer<Element, Element>,
 })
 
+function onCatalogKeydown(event: KeyboardEvent) {
+  if (event.code === 'Enter' && keyboardPreviewTimer) {
+    clearTimeout(keyboardPreviewTimer)
+    keyboardPreviewTimer = null
+  }
+  const previousIndex = activeIndex.value
+  const handled = onSearchInputKeydown(event)
+  if (!handled || !hebrewBooksLocalFolder.value) return
+  if (!['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.code)) return
+
+  const index = activeIndex.value
+  if (index === previousIndex || index < 0) return
+  const book = displayedBooks.value[index]
+  if (!book) return
+  if (keyboardPreviewTimer) clearTimeout(keyboardPreviewTimer)
+  keyboardPreviewTimer = setTimeout(() => {
+    keyboardPreviewTimer = null
+    openBook(book)
+  }, 150)
+}
+
 const selectedBookId = computed(() => paneNavigation.activeTab.localFileHbBookId)
 
 const resultsSummary = computed(() => {
@@ -70,6 +92,10 @@ const resultsSummary = computed(() => {
 
 watch(displayedBooks, () => {
   activeIndex.value = -1
+  if (keyboardPreviewTimer) {
+    clearTimeout(keyboardPreviewTimer)
+    keyboardPreviewTimer = null
+  }
 })
 
 onMounted(() => {
@@ -81,6 +107,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (clickTimer) clearTimeout(clickTimer)
+  if (keyboardPreviewTimer) clearTimeout(keyboardPreviewTimer)
   const tab = tabStore.tabs.find((t) => t.id === hebrewBooksTabId)
   const stillHebrewBooks = tab?.route === '/hebrewbooks'
   tabStore.updateTab(hebrewBooksTabId, {
@@ -98,6 +125,10 @@ function onBookClicked(
   book: (typeof displayedBooks.value)[number],
   openInNewTab = false,
 ) {
+  if (keyboardPreviewTimer) {
+    clearTimeout(keyboardPreviewTimer)
+    keyboardPreviewTimer = null
+  }
   activeIndex.value = i
   if (openInNewTab) {
     openBook(book, true)
@@ -111,6 +142,10 @@ function onBookClicked(
 }
 
 function onBookDoubleClicked(i: number, book: (typeof displayedBooks.value)[number]) {
+  if (keyboardPreviewTimer) {
+    clearTimeout(keyboardPreviewTimer)
+    keyboardPreviewTimer = null
+  }
   activeIndex.value = i
   if (clickTimer) {
     clearTimeout(clickTimer)
@@ -133,7 +168,7 @@ function onBookDoubleClicked(i: number, book: (typeof displayedBooks.value)[numb
         dir="rtl"
         aria-label="חיפוש ספרים"
         @input="search(($event.target as HTMLInputElement).value)"
-        @keydown="onSearchInputKeydown"
+        @keydown="onCatalogKeydown"
         @keydown.esc.prevent="clearSearch"
       />
       <template #right>
@@ -160,7 +195,7 @@ function onBookDoubleClicked(i: number, book: (typeof displayedBooks.value)[numb
       tabindex="0"
       role="listbox"
       aria-label="רשימת ספרי HebrewBooks"
-      @keydown="onSearchInputKeydown"
+      @keydown="onCatalogKeydown"
     >
       <LoadingAnimation v-if="isLoading" />
 
@@ -185,6 +220,7 @@ function onBookDoubleClicked(i: number, book: (typeof displayedBooks.value)[numb
               :book="displayedBooks[vRow.index]!"
               :focused="activeIndex === vRow.index || String(displayedBooks[vRow.index]!.id) === String(selectedBookId)"
               :has-local-file="localFileBookIds.has(String(displayedBooks[vRow.index]!.id))"
+              :local-folder-configured="Boolean(hebrewBooksLocalFolder)"
               @book-clicked="(book, openInNewTab) => onBookClicked(vRow.index, book, openInNewTab)"
               @book-double-clicked="(book) => onBookDoubleClicked(vRow.index, book)"
               @download-clicked="downloadBook"
