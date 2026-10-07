@@ -18,12 +18,26 @@ Status: **the Service is now wired to Core** (2026-10-07). Baseline branch: `pre
 > | The severed-channel HRESULT list ×2 | Core's Word files are `<Compile Remove>`d from its net10 leg, so DocConvertLib's modern leg cannot reach them even though it references Core |
 > | DocumentLocator pipe vs in-process | only Local System can read the USN journal, and the pipe is what keeps the per-user app from needing elevation |
 >
-> **What is NOT done, and is deliberately out of scope here:** the hosted bridge still accepts
-> raw SQL from the frontend (`__webviewQuery`, `queries.sql.ts`, 829 lines). Retiring it means
-> exposing ~40 typed operations over the WebView2 bridge — a frontend slice, and the same one
-> rule 0e's post-migration note defers along with the JSON→MessagePack sweep. `KitveiHakodeshLib`
-> keeps `DbAccess`/`HebrewBooksDb`/`UserSettingsDbAccess` (and their Dapper +
-> System.Data.SQLite dependency) until that lands.
+> **The raw-SQL bridge is retired too (2026-10-07).** `KitveiHakodeshLib/Db/SeforimQueryHandler`
+> answers the SAME 33 operation names the dev service does, through the same Core methods, so
+> `seforimApi.ts` is one call per capability instead of a dev branch and a hosted branch.
+> `queries.sql.ts` is off every live path — the only file still importing it is
+> `bookCatalogSearchTocHeuristics.ts`, a retained fallback that nothing imports.
+>
+> ⚠ **Two traps that bridge hit, worth knowing before adding another typed action:**
+> - **Casing.** `WebBridge.Reply` serializes with no naming policy, so a typed C# model goes out
+>   PascalCase while the frontend row types are camelCase (the SQL used to select camelCase
+>   aliases). The dev transport converts on decode in `serviceClient.ts`; a hosted action that
+>   returns a Core model must do the same, or every field reads back `undefined`.
+> - **Reserved argument names.** `JsBridge.post` builds the message as
+>   `Object.assign({ id }, payload)`, so an argument spread onto the root called `id` overwrites
+>   the correlation id and the reply can never be routed back — the call hangs forever and the
+>   throw is swallowed in the message loop. `seforimQuery` nests its arguments under `params`
+>   for exactly this reason; `getBookById` takes an `id`.
+>
+> Still outstanding: `KitveiHakodeshLib` keeps `DbAccess`/`HebrewBooksDb`/`UserSettingsDbAccess`
+> (and Dapper + System.Data.SQLite) for the dictionary and user-annotation bridges, which still
+> pass SQL. Those are the next candidates, and the same two traps apply.
 
 > **The point is ONE implementation, not fewer lines.** A wrapper that stays long is fine; two
 > copies of the same algorithm are not. The measure of a slice is how many implementations of a
