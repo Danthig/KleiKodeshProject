@@ -29,7 +29,8 @@ so Core was complete but *nothing called it*. That second half is now done for t
 | Related-form expansion | ✅ wired, **both legs** | one expander; the Lib's hand-maintained net48 twin and its "keep the two in sync" rule are gone |
 | Seforim-DB content fingerprint | ✅ wired, **both legs** | was THREE copies (Lib `FtsIndexState`, Service `DbContentStamp`, Core); now one |
 | FTS index BUILD + provenance | ✅ wired, **both legs** | one build loop, one set of stamps, one staleness check. The Lib's app-version gate retires — it rebuilt on every app update even when indexing had not changed; the precise question is Core's `IndexFormatVersion`, and a release that WANTS everyone to reindex has the installer's `-p:DeleteFtsIndex` switch |
-| FTS search/streaming, fonts, updater, DocumentLocator | ⬜ not yet wired | search execution and the session/streaming layers are still per-host |
+| FTS search execution | ✅ wired, **both legs** | snippets, the match + word-distance filters, short-snippet embellishment and enrichment all Core's. Each host keeps only its FLUSH RHYTHM: fixed 256-batches over a pipe for the service, doubling-then-timer (1,2,4,8,16 then 300ms) for the hosted app so the first result appears instantly |
+| Fonts, updater, DocumentLocator | ⬜ not yet wired | |
 | KitveiHakodeshLib (rest of the hosted leg) | ⬜ not yet wired | still its own copies throughout |
 
 **The pattern each wrapper follows**, and the rule that decides what stays behind:
