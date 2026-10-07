@@ -7,6 +7,12 @@ Status: **the Service is now wired to Core** (2026-10-07). Baseline branch: `pre
 
 ### Where the migration actually stands
 
+> **The point is ONE implementation, not fewer lines.** A wrapper that stays long is fine; two
+> copies of the same algorithm are not. The measure of a slice is how many implementations of a
+> behaviour survive it — the catalog went 3 → 1, the fingerprint 3 → 1, expansion 3 → 1 — not
+> how much shorter a file got.
+
+
 Core was written slice by slice while `KitveiHakodeshService` kept its own copy of everything —
 so Core was complete but *nothing called it*. That second half is now done for the Service:
 
@@ -20,7 +26,9 @@ so Core was complete but *nothing called it*. That second half is now done for t
 | Seforim DB queries | ✅ wired | `SeforimDbService` — wrapper, 172 lines (was 101 + 864 + 531) |
 | Seforim row models | ✅ deduped | 33 duplicate types deleted; `GlobalUsings.cs` aliases Core's |
 | Catalog TOC (Lucene) | ✅ wired, **both legs** | `CatalogTocSearchService` (service) and `CatalogTocHandler` (Lib) over Core's one engine; 2,733 lines of duplicate deleted |
-| FTS, fonts, updater, DocumentLocator | ⬜ not yet wired | still Service-owned copies |
+| Related-form expansion | ✅ wired, **both legs** | one expander; the Lib's hand-maintained net48 twin and its "keep the two in sync" rule are gone |
+| Seforim-DB content fingerprint | ✅ wired, **both legs** | was THREE copies (Lib `FtsIndexState`, Service `DbContentStamp`, Core); now one |
+| FTS index/search, fonts, updater, DocumentLocator | ⬜ not yet wired | still two implementations (Lib `Search/*` 2,114 lines vs Service 1,293) |
 | KitveiHakodeshLib (rest of the hosted leg) | ⬜ not yet wired | still its own copies throughout |
 
 **The pattern each wrapper follows**, and the rule that decides what stays behind:
