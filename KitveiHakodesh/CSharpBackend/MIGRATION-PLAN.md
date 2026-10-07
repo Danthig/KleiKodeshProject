@@ -19,8 +19,9 @@ so Core was complete but *nothing called it*. That second half is now done for t
 | Seforim DB path | ✅ wired | `SeforimDbLocator` — 45-line adapter over `SeforimDbPathResolver` |
 | Seforim DB queries | ✅ wired | `SeforimDbService` — wrapper, 172 lines (was 101 + 864 + 531) |
 | Seforim row models | ✅ deduped | 33 duplicate types deleted; `GlobalUsings.cs` aliases Core's |
-| FTS, catalog TOC, fonts, updater, DocumentLocator | ⬜ not yet wired | still Service-owned copies |
-| KitveiHakodeshLib (hosted leg) | ⬜ not yet wired | still its own copies throughout |
+| Catalog TOC (Lucene) | ✅ wired, **both legs** | `CatalogTocSearchService` (service) and `CatalogTocHandler` (Lib) over Core's one engine; 2,733 lines of duplicate deleted |
+| FTS, fonts, updater, DocumentLocator | ⬜ not yet wired | still Service-owned copies |
+| KitveiHakodeshLib (rest of the hosted leg) | ⬜ not yet wired | still its own copies throughout |
 
 **The pattern each wrapper follows**, and the rule that decides what stays behind:
 Core returns data or throws (rule 4); a transport decides what the user sees. So the wrapper
@@ -44,6 +45,19 @@ names into the frozen wire names the frontend already speaks. Everything else is
 > Both are now fixed in Core, with the declared-base column probed as part of `SeforimDbSchema`
 > (it is a schema fact, so it belongs with the other ones) rather than passed around as a string.
 >
+> **Already-known stale spots, found by running this check across every area (2026-10-07).**
+> Everything not listed came back clean — FTS, fonts, the updater, and
+> `SeforimDbContentFingerprint` (which is actually AHEAD of the service: it fingerprints a
+> schema-6 database with SQL `length(content)` where `DbContentStamp` still throws).
+>
+> | Core file | Written | Service/Lib fixed since | What would be lost |
+> |---|---|---|---|
+> | `SeforimDbCatalog/*` | 2026-08-25 | **5 commits**, 2026-08-26/27 | ✅ **PORTED 2026-10-07.** word-proximity ranking (`PathScratch`, `StableSortByProximity`), quoted-acronym ranking (`GetQuotedAbbreviationKey(s)`, `HitCarriesQuotedKey`), title/author outranking a category (`MatchesOnTitleOrAuthor`, `StableSortByFieldAccuracy`), and one abbreviation-map entry that had gained a second alternative. Note commit 3 REVERTS commit 2's index-side half, so the port is the final state: no `qa` field, no v21 bump — `IndexFormatVersion` stays `v20`, so no user rebuild |
+> | `Common/WordExporter.cs` | 2026-08-25 | `2d31de77`, 2026-09-16 | the whole COM-lifetime rewrite: one-shot acquisition that PROVES the cached Word still answers, a `ComScope` that releases every walked proxy, an STA thread, and a busy gate. Core is 172 lines; Lib is 457 |
+>
+> `KitveiHakodeshLib/Settings/AppSettings.cs` also moved on 2026-08-27, but Core already
+> matches it (empty stored value means "no choice"), so that one is fine.
+
 > **The check to run before wiring any area**, not after:
 > ```
 > git log --since=<date Core's files for that area were written> -- KitveiHakodeshService/<area>
