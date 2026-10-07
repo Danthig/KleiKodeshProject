@@ -62,7 +62,24 @@ names into the frozen wire names the frontend already speaks. Everything else is
 > | Core file | Written | Service/Lib fixed since | What would be lost |
 > |---|---|---|---|
 > | `SeforimDbCatalog/*` | 2026-08-25 | **5 commits**, 2026-08-26/27 | ✅ **PORTED 2026-10-07.** word-proximity ranking (`PathScratch`, `StableSortByProximity`), quoted-acronym ranking (`GetQuotedAbbreviationKey(s)`, `HitCarriesQuotedKey`), title/author outranking a category (`MatchesOnTitleOrAuthor`, `StableSortByFieldAccuracy`), and one abbreviation-map entry that had gained a second alternative. Note commit 3 REVERTS commit 2's index-side half, so the port is the final state: no `qa` field, no v21 bump — `IndexFormatVersion` stays `v20`, so no user rebuild |
-> | `Common/WordExporter.cs` | 2026-08-25 | `2d31de77`, 2026-09-16 | the whole COM-lifetime rewrite: one-shot acquisition that PROVES the cached Word still answers, a `ComScope` that releases every walked proxy, an STA thread, and a busy gate. Core is 172 lines; Lib is 457 |
+> | `Common/WordExporter.cs` | 2026-08-25 | `2d31de77`, 2026-09-16 | ⚠ **PARTLY RESOLVED 2026-10-07.** The part that was a real shared rule — "does this cached Word still ANSWER?" — is now in Core as `RunningWordFinder.IsAlive`/`IsDisconnected`, and the Lib calls it instead of keeping its own copy of the audited HRESULT list. The REST is not a duplicate at all: see below |
+
+> ### Word automation is THREE implementations ON PURPOSE — do not collapse them
+> Checked 2026-10-07. The instinct to unify these is wrong, and the reasons are not obvious:
+> - **`KitveiHakodeshLib/WordExporter`** (net48, 457 lines) reuses `WordToPdfConverter.HostApplication`
+>   — *the live Word the VSTO add-in is hosted inside*. A generic library must not know about that.
+>   Its `Describe()` maps HRESULTs to Hebrew user-facing text, which is presentation, not policy.
+> - **`DocConvertLib.AotWordPaste`** (net48 + net10) drives Word through manual COM/IDispatch
+>   because the Office PIA cannot load under native AOT. The service uses this one.
+> - **`Core/Common/WordExporter`** uses the PIA on its net48 leg and is currently UNUSED.
+>
+> What genuinely WAS duplicated is the liveness rule, and that is the piece that moved. Note the
+> trap in it: `0x80010005` (RPC_E_CANTCALLOUT_INEXTERNALCALL) is a BUSY, alive Word. Listing a busy
+> code as "dead" discards the user's own Word and starts a second one beside it.
+>
+> If `Core/Common/WordExporter` is ever adopted, `RunningWordFinder.HostApplication` has to be set
+> at VSTO startup (`KleiKodeshVsto/ThisAddIn.cs` already sets two other such properties) — that is
+> a VSTO-startup change and needs sign-off before anyone makes it.
 >
 > `KitveiHakodeshLib/Settings/AppSettings.cs` also moved on 2026-08-27, but Core already
 > matches it (empty stored value means "no choice"), so that one is fine.
