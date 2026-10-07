@@ -7,6 +7,24 @@ Status: **the Service is now wired to Core** (2026-10-07). Baseline branch: `pre
 
 ### Where the migration actually stands
 
+> ## ✅ BACKEND UNIFICATION COMPLETE (2026-10-07)
+> Every behaviour both apps share now has ONE implementation. Audited by grepping for each
+> behaviour's distinguishing identifier; the only multi-file hits left are the ones below, each
+> architecturally forced and each now documented in the code so it is not "fixed" later:
+>
+> | Looks duplicated | Why it is not |
+> |---|---|
+> | Word automation ×3 (Lib / DocConvertLib / Core) | the Lib reuses the live Word the VSTO add-in runs INSIDE; DocConvertLib uses manual COM because ILC cannot load the Office PIA; Core uses the PIA on its net48 leg |
+> | The severed-channel HRESULT list ×2 | Core's Word files are `<Compile Remove>`d from its net10 leg, so DocConvertLib's modern leg cannot reach them even though it references Core |
+> | DocumentLocator pipe vs in-process | only Local System can read the USN journal, and the pipe is what keeps the per-user app from needing elevation |
+>
+> **What is NOT done, and is deliberately out of scope here:** the hosted bridge still accepts
+> raw SQL from the frontend (`__webviewQuery`, `queries.sql.ts`, 829 lines). Retiring it means
+> exposing ~40 typed operations over the WebView2 bridge — a frontend slice, and the same one
+> rule 0e's post-migration note defers along with the JSON→MessagePack sweep. `KitveiHakodeshLib`
+> keeps `DbAccess`/`HebrewBooksDb`/`UserSettingsDbAccess` (and their Dapper +
+> System.Data.SQLite dependency) until that lands.
+
 > **The point is ONE implementation, not fewer lines.** A wrapper that stays long is fine; two
 > copies of the same algorithm are not. The measure of a slice is how many implementations of a
 > behaviour survive it — the catalog went 3 → 1, the fingerprint 3 → 1, expansion 3 → 1 — not
