@@ -35,9 +35,28 @@ Status: **the Service is now wired to Core** (2026-10-07). Baseline branch: `pre
 >   throw is swallowed in the message loop. `seforimQuery` nests its arguments under `params`
 >   for exactly this reason; `getBookById` takes an `id`.
 >
-> Still outstanding: `KitveiHakodeshLib` keeps `DbAccess`/`HebrewBooksDb`/`UserSettingsDbAccess`
-> (and Dapper + System.Data.SQLite) for the dictionary and user-annotation bridges, which still
-> pass SQL. Those are the next candidates, and the same two traps apply.
+> **The dictionary followed (2026-10-07)**: `DictionaryQueryHandler` answers the same nine
+> lookups the dev service does. Two of them did real work in the page — `dictAbbrevSenses`
+> walked the candidate list a query at a time twice over, and `dictSpellCandidates` issued two
+> fragment queries and merged them — and both loops already existed in Core.
+>
+> **User annotations stay raw SQL ON PURPOSE** (typed methods for the read-only shipped corpus,
+> frontend-supplied SQL for user-owned mutable data). What was NOT on purpose: the hosted leg
+> ran that SQL with **no guard at all**, where the service has enforced the allowlist since
+> 2026-08-21 — a compromised page could ATTACH and write an arbitrary SQLite file. It now goes
+> through Core's `UserAnnotationStore`, so both legs are guarded, and the quote-aware `?` rewrite
+> replaces a plain `Regex.Replace` that mangled any note containing a question mark.
+>
+> **What is left, and why it is not a migration task:**
+> - `dict-sql` has NO frontend caller — dead, not pending.
+> - `sql` has ONE caller, `seforimDb.query()`, reached only from
+>   `bookCatalogSearchTocHeuristics.ts`, a retained fallback nothing imports.
+> - `HandleWikiDictSql` is routed from no action in the message switch.
+> - `queries.sql.ts` / `dictionaryDb.sql.ts` are off every live path.
+>
+> All four are DEAD CODE for the cleanup slice to delete, not duplicate implementations. The
+> Lib's remaining Dapper users are `DbAccess` (behind the dead `sql` action) and `HebrewBooksDb`;
+> retiring those removes the Dapper + System.Data.SQLite dependency entirely.
 
 > **The point is ONE implementation, not fewer lines.** A wrapper that stays long is fine; two
 > copies of the same algorithm are not. The measure of a slice is how many implementations of a
