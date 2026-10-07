@@ -28,7 +28,8 @@ so Core was complete but *nothing called it*. That second half is now done for t
 | Catalog TOC (Lucene) | ✅ wired, **both legs** | `CatalogTocSearchService` (service) and `CatalogTocHandler` (Lib) over Core's one engine; 2,733 lines of duplicate deleted |
 | Related-form expansion | ✅ wired, **both legs** | one expander; the Lib's hand-maintained net48 twin and its "keep the two in sync" rule are gone |
 | Seforim-DB content fingerprint | ✅ wired, **both legs** | was THREE copies (Lib `FtsIndexState`, Service `DbContentStamp`, Core); now one |
-| FTS index/search, fonts, updater, DocumentLocator | ⬜ not yet wired | still two implementations (Lib `Search/*` 2,114 lines vs Service 1,293) |
+| FTS index BUILD + provenance | ✅ wired, **both legs** | one build loop, one set of stamps, one staleness check. The Lib's app-version gate retires — it rebuilt on every app update even when indexing had not changed; the precise question is Core's `IndexFormatVersion`, and a release that WANTS everyone to reindex has the installer's `-p:DeleteFtsIndex` switch |
+| FTS search/streaming, fonts, updater, DocumentLocator | ⬜ not yet wired | search execution and the session/streaming layers are still per-host |
 | KitveiHakodeshLib (rest of the hosted leg) | ⬜ not yet wired | still its own copies throughout |
 
 **The pattern each wrapper follows**, and the rule that decides what stays behind:
