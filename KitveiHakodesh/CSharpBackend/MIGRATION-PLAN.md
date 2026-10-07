@@ -30,7 +30,9 @@ so Core was complete but *nothing called it*. That second half is now done for t
 | Seforim-DB content fingerprint | ✅ wired, **both legs** | was THREE copies (Lib `FtsIndexState`, Service `DbContentStamp`, Core); now one |
 | FTS index BUILD + provenance | ✅ wired, **both legs** | one build loop, one set of stamps, one staleness check. The Lib's app-version gate retires — it rebuilt on every app update even when indexing had not changed; the precise question is Core's `IndexFormatVersion`, and a release that WANTS everyone to reindex has the installer's `-p:DeleteFtsIndex` switch |
 | FTS search execution | ✅ wired, **both legs** | snippets, the match + word-distance filters, short-snippet embellishment and enrichment all Core's. Each host keeps only its FLUSH RHYTHM: fixed 256-batches over a pipe for the service, doubling-then-timer (1,2,4,8,16 then 300ms) for the hosted app so the first result appears instantly |
-| Fonts, updater, DocumentLocator | ⬜ not yet wired | |
+| Fonts | ✅ wired, **both legs** | was THREE DirectWrite enumerators; now one (`Common/HebrewFonts`, `#if` for the factory import) |
+| Updater | ✅ wired | the release model, version comparison, installed-version read and the **installer-variant rule** all Core's. `UpdateCheckerLib` keeps its WinForms/WPF progress + notification UI and the installer launch |
+| DocumentLocator | ✅ **nothing to do — see below** | the two paths are architecturally required, not duplicates |
 | KitveiHakodeshLib (rest of the hosted leg) | ⬜ not yet wired | still its own copies throughout |
 
 **The pattern each wrapper follows**, and the rule that decides what stays behind:
@@ -1621,6 +1623,30 @@ One pass over the 12 drifted pairs, on Service's names:
 `restoreLocalFile`→`openLocalFile`, `ResetDocumentLocatorIndex` casing.
 **`getWordSynonyms` is NOT `dictSynonyms`** — Word COM thesaurus vs dictionary DB, two
 different features. Nav labels key `SINGLETON_ROUTES`; renames need lockstep updates.
+
+### Slice 9 — DocumentLocator — ⚠ THE PREMISE BELOW IS WRONG (checked 2026-10-07)
+
+**Do not "delete the pipe architecture". It is load-bearing.**
+
+`DocumentLocator/README.md` states why: only **Local System** can open raw NTFS volumes via
+`FSCTL_ENUM_USN_DATA`, so the index is built by a Windows service, and the named pipe exists
+precisely *"so your app never needs elevation"*. The hosted net48 app is a per-user install that
+must never elevate (see the per-user-install rule) — so its pipe path is the ONLY path open to
+it. Removing it would mean either elevating the app or losing live USN updates.
+
+The service's in-process `PathIndex` is not the same thing done twice: it is **dev-only** (not in
+the installer payload; vite spawns it from `bin`), and `DocumentLocatorService` already documents
+that, including the fact that `DefaultIndexPath` resolves per-process so the two hosts
+deliberately do NOT share a directory today.
+
+What is genuinely shared already is: `DocumentLocator` itself multi-targets `net48;net10.0-windows`
+and both hosts reference it, and the excluded-folder list goes through the library's own
+`ExcludedFoldersPersistence` — one implementation, one `excluded_folders.json` format.
+
+So: nothing to unify here. If the service ever ships to users, the one thing to fix is the index
+path, and Core's `AppFileLocator` is the piece for it.
+
+--- the original (incorrect) plan text, kept so the reasoning above is not re-litigated ---
 
 ### Slice 9 — DocumentLocator: absorb the library, delete the pipe architecture
 
