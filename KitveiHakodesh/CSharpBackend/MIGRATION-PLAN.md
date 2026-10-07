@@ -3,7 +3,66 @@
 Consolidating the duplicated logic in `KitveiHakodeshLib` (net48, WebView2 host) and
 `KitveiHakodeshService` (net10, dev service) into one shared project: **`KitveiHakodesh.Core`**.
 
-Status: planning complete, no code migrated yet. Baseline branch: `pre-migration-baseline`.
+Status: **the Service is now wired to Core** (2026-10-07). Baseline branch: `pre-migration-baseline`.
+
+### Where the migration actually stands
+
+Core was written slice by slice while `KitveiHakodeshService` kept its own copy of everything —
+so Core was complete but *nothing called it*. That second half is now done for the Service:
+
+| Area | State | Service file today |
+|---|---|---|
+| Dictionary | ✅ wired | `DictionaryService` — wrapper, 120 lines (was 242) |
+| HebrewBooks | ✅ wired | `HebrewBooksService` — wrapper, 130 lines (was 385) |
+| User annotations | ✅ wired | `UserSettingsService` — wrapper, 125 lines (was 275) |
+| Registry settings | ✅ deleted | Service copy gone; callers use `Core.Settings.AppSettingsRegistry` |
+| Seforim DB path | ✅ wired | `SeforimDbLocator` — 45-line adapter over `SeforimDbPathResolver` |
+| Seforim DB queries | ✅ wired | `SeforimDbService` — wrapper, 172 lines (was 101 + 864 + 531) |
+| Seforim row models | ✅ deduped | 33 duplicate types deleted; `GlobalUsings.cs` aliases Core's |
+| FTS, catalog TOC, fonts, updater, DocumentLocator | ⬜ not yet wired | still Service-owned copies |
+| KitveiHakodeshLib (hosted leg) | ⬜ not yet wired | still its own copies throughout |
+
+**The pattern each wrapper follows**, and the rule that decides what stays behind:
+Core returns data or throws (rule 4); a transport decides what the user sees. So the wrapper
+keeps exactly three things — finding the database once, the host's ERROR POLICY (log and answer
+empty rather than let an exception reach the RPC loop), and translating Core's clearer model
+names into the frozen wire names the frontend already speaks. Everything else is delegation.
+
+> ### ⚠ WIRING A SLICE CAN SILENTLY REVERT A LATER FIX — CHECK EVERY TIME
+> Core was written slice by slice in **August**, while the Service kept being fixed afterwards.
+> So for any area, Core may predate a Service improvement, and "delegate to Core" then quietly
+> undoes it. This is invisible in the diff: the Service file shrinks and everything compiles.
+>
+> **Caught exactly this way in the SeforimDb slice** — `GetReverseLineData` / `GetReverseBooks`:
+> - Core hardcoded `l.baseProvenance`; the Service had learned (2026-08-27, `8146ebe8`) to probe
+>   which column the schema uses, because Zayit spells it `isDeclaredBase`. Core's version would
+>   have thrown "no such column" on every Zayit database.
+> - Core's corpus fallback dropped the `isBaseBook = 0` guard the Service added the same day
+>   (`8d5adb0f`, *"A tractate is nobody's commentary"*). Without it every unprovenanced commentary
+>   linking into a tractate is reported as that tractate's SOURCE.
+>
+> Both are now fixed in Core, with the declared-base column probed as part of `SeforimDbSchema`
+> (it is a schema fact, so it belongs with the other ones) rather than passed around as a string.
+>
+> **The check to run before wiring any area**, not after:
+> ```
+> git log --since=<date Core's files for that area were written> -- KitveiHakodeshService/<area>
+> ```
+> and diff the SQL / behaviour rather than trusting that Core "is the same thing". A text diff of
+> the SQL strings, normalised for the helper renames, finds these in minutes; reading the two
+> files side by side does not.
+
+**Two corrections made while wiring, worth not rediscovering:**
+- The user-annotations **SQL guard** (allowlist of verbs/tables, ATTACH and friends forbidden)
+  existed only in the Service. It is the entire boundary between frontend-supplied SQL and
+  arbitrary SQLite, and the hosted bridge runs the same frontend SQL — so it moved INTO Core as
+  `UserAnnotations/UserAnnotationSqlGuard`, where both transports get it. Core now guards on
+  every `Query`/`Execute`.
+- `SeforimDbPathResolver.Resolve()` returns "not found" instead of a path known not to exist, so
+  `getSeforimDbPath` now answers `Path = ""` rather than a default probe path with `Exists=false`.
+  Verified against the frontend: both `SettingsPageAdvancedSection.vue` and `SetupWizardStepDb.vue`
+  only display the value, and the setup wizard is what handles "no database" — so an empty field
+  is correct, not a lost hint.
 
 > ## ⚠ THE SERVICE SHIPS AS NATIVE AOT — HOLD THIS THROUGH EVERY SLICE
 > `KitveiHakodeshService` sets `PublishAot=true` and references Core, so **everything in
