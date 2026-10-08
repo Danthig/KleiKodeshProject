@@ -84,7 +84,7 @@ so Core was complete but *nothing called it*. That second half is now done for t
 | Fonts | ✅ wired, **both legs** | was THREE DirectWrite enumerators; now one (`Common/HebrewFonts`, `#if` for the factory import) |
 | Updater | ✅ wired | the release model, version comparison, installed-version read and the **installer-variant rule** all Core's. `UpdateCheckerLib` keeps its WinForms/WPF progress + notification UI and the installer launch |
 | DocumentLocator | ✅ **nothing to do — see below** | the two paths are architecturally required, not duplicates |
-| KitveiHakodeshLib (rest of the hosted leg) | ⬜ not yet wired | still its own copies throughout |
+| KitveiHakodeshLib (rest of the hosted leg) | ✅ wired | Overtaken by the rows above: the Lib IS the second of the "both legs". Every data-touching file delegates to Core and owns no SQL — the only `SELECT`/`INSERT` text left in it is in comments describing the queries the FRONTEND supplies to the user-settings bridge. Lib's csproj references Core and no longer carries Dapper or System.Data.SQLite. What remains is genuinely host-only: WebView2 plumbing (`AppViewer*`, `JsBridge`, `ChromeTabsMirror`), the typed bridges (`SeforimQueryHandler`, `DictionaryQueryHandler`), and the net48 Word/PDF paths |
 
 **The pattern each wrapper follows**, and the rule that decides what stays behind:
 Core returns data or throws (rule 4); a transport decides what the user sees. So the wrapper
