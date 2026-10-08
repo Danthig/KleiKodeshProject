@@ -1816,8 +1816,8 @@ have to be reviewed for correctness. Each item is verified dead, not merely susp
 |---|---|
 | `KitveiHakodeshLib/HebrewBooks.db` | **tracked** but declared in no csproj; byte-identical (`4e417017…`) to the two live copies |
 | `vue-frontend/public/dictionary/KitveiHakodesh_dictionary.db` (9.5 MB) | **no reader anywhere** — both transports go through C# (`dictionaryDb.ts` says so). Copied into `dist/` on every build |
-| `catalog_abbreviations.csv` + `csv_to_json.py` | CSV last touched 2026-07-22 while the json/`.g.cs` moved together 2026-08-13 — out of the flow for weeks |
-| `catalog_abbreviations.json` + `gen_catalog_abbreviations.py` + `CheckCatalogAbbreviationsFresh` | verified 1:1 with the generated C# (275 = 275). **Port the two invariants to unit tests first** — no quote glyph in a key, no colliding keys |
+| ~~`catalog_abbreviations.csv` + `csv_to_json.py`~~ | **DONE — deleted.** Nothing referenced them in any csproj or source; the `.json` they fed was already gone |
+| ~~`catalog_abbreviations.json` + `gen_catalog_abbreviations.py` + `CheckCatalogAbbreviationsFresh`~~ | **DONE — deleted, invariants ported first.** `SeforimDbCatalogAbbreviationsCheck.Verify()` holds both (no quote glyph in a key; no colliding keys) and `KitveiHakodeshService.Tests` runs it before every mode — it needs no database, so it always runs. Proven by injecting one fault of each kind: both were caught (exit 3), then reverted |
 | `wikidictionary.db` | referenced in exactly ONE line; the file exists nowhere in the repo, so `_wikiDb` is always null and `QueryWiki` always no-ops. **Decide: finish it or delete it** |
 | Lib's `Dapper` / `Dapper.SqlBuilder` references | unused once Core is raw ADO (rule 0d). Note `Dapper.SqlBuilder`'s HintPath points three levels up, unlike every sibling — it would break on a fresh clone |
 | `NET10_SPLIT_AND_OPTIMIZATION.md` | 7 references to the now-deleted `SearchParallel` |
