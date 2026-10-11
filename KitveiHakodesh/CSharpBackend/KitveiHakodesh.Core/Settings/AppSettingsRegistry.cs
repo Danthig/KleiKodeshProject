@@ -43,7 +43,7 @@ namespace KitveiHakodesh.Core.Settings
         {
             try
             {
-                using var registryKey = Registry.CurrentUser.OpenSubKey(SubKey(app, section));
+                using var registryKey = UserProfile.Hive.OpenSubKey(SubKey(app, section));
                 return registryKey?.GetValue(key) as string ?? fallback;
             }
             catch
@@ -55,7 +55,7 @@ namespace KitveiHakodesh.Core.Settings
         /// <summary>Writes a value, creating the key path if needed.</summary>
         public static void Set(string app, string section, string key, string value)
         {
-            using var registryKey = Registry.CurrentUser.CreateSubKey(SubKey(app, section));
+            using var registryKey = UserProfile.Hive.CreateSubKey(SubKey(app, section));
             registryKey?.SetValue(key, value ?? "");
         }
 
