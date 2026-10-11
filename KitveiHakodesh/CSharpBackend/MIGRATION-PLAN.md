@@ -1828,3 +1828,65 @@ exists twice: the old `UserSettingsDbAccess` / `DbAccess` / `HebrewBooksDb` / `D
 copies, `FtsLib/SeforimDb/*`, the `__webviewQuery` / `__webviewDictQuery` bridge actions, and
 the Mutex-based build lock.
 
+
+---
+
+# Leg 2 - Service-only data access (started 2026-10-11)
+
+**Goal (the whole point):** after this leg, `KitveiHakodeshService` is the ONLY csproj that
+references SQLite, Lucene, FtsLib - or `KitveiHakodesh.Core`. `KitveiHakodeshLib`,
+`KitveiHakodeshDemoApp`, `KleiKodeshVsto` and `UpdateCheckerLib` reach data through the
+service's named pipe. The dev web app is untouched (it keeps the loopback HTTP host).
+
+**Decided with the user:**
+- The service is a HARD runtime dependency. No fallback for now.
+- Hosted = pipe. Only dev uses the loopback HTTP host.
+- Keep the door open for a fallback: callers go through `IKitveiHakodeshServiceChannel`
+  (KitveiHakodesh.ServiceClient). A future in-process answerer is a second implementation.
+- DocumentLocator and its own pipe are NOT part of this leg (they are the leg after).
+
+**Shape:**
+- `KitveiHakodesh.ServiceClient` (net48, SDK-style): pipe connect, frame protocol, the channel
+  interface. Carries opaque bytes - no MessagePack, no DTOs, no Core.
+- `KitveiHakodeshLib/Bridge/ServiceRpcRelay.cs`: WebResourceRequested handler for the virtual
+  host `http://kitvei-service`. `POST /rpc` -> one pipe round-trip; `POST /rpc-stream` -> the
+  pipe stream IS the response body (same `[len][frame]` chunks as the HTTP route). CORS
+  preflight answered locally. 503 when the pipe is unreachable (serviceClient.ts retries 503).
+- `vue-frontend/src/webview-host/serviceClient.ts` is now the one client for both runtimes:
+  hosted base URL = `http://kitvei-service`, no token.
+
+**Slice 1 - DONE 2026-10-11:** seforim ops + dictionary ops + catalog TOC-title fetch go
+through the relay. Deleted: `Db/SeforimQueryHandler.cs`, `Dictionary/DictionaryQueryHandler.cs`,
+the `seforimQuery`/`dictQuery` bridge actions, `__webviewQuery`/`__webviewDictQuery`,
+`hostedBridgeContract.test.ts`, `queries.sql.ts`, `seforimDb.query()`. Lib, Demo and the
+frontend build. NOT yet verified live (the streaming relay path in particular).
+
+**Remaining slices (each: frontend callers -> serviceCall, delete the Lib handler, then drop
+the Core types it used):**
+1. Catalog TOC search (`catalogTocSearch/Status/ResetIndex`) - Lib `Catalog/*` goes, and with
+   it Lucene + J2N + M.E.Configuration/Primitives from Lib's packages.config.
+2. Full-text search - `ftsSearchStream` + `ftsIndexProgressStream` replace the
+   `FtsSearchStart/Cancel` + `searchBatch` push events; Lib `Search/*` goes. Service gaps to
+   decide: skip offset, delete-index-without-rebuild, eta/segment progress fields, the
+   `ftsDbNotFound` / `ftsIndexInvalidated` pushes.
+3. User settings - `userSettingsQuery/Execute` (JSON-in-msgpack shape); Lib `UserSettings/*`
+   goes. Gap: the user_settings.db copy-on-DB-switch prompt has no service op.
+4. HebrewBooks - `hbSearch` + download ops; Lib `HebrewBooksDb` + the Core downloader go.
+   Gap: the service answers with an HTTP `/file` handle, hosted needs a path (or the relay
+   learns to serve `/file/*` by asking the service). Cache dirs differ.
+5. Seforim DB path (`get/set/pick/clearSeforimDbPath`) - the service restarts itself on
+   change; Lib `DbHandler` shrinks to what is UI (reset settings, title-bar theme). Gap:
+   CanOpen validation (service checks File.Exists only).
+6. `AppSettings` - Lib gets its own registry accessors for UI-only values (dark mode, colours,
+   window bounds); the data-adjacent ones (db path, hb folder, turn-off-updates) go to the
+   service ops. Then the `KitveiHakodesh.Core` reference leaves Lib's csproj.
+7. `UpdateCheckerLib` - inline the three Core.Updates helpers; drop its Core reference.
+8. VSTO leftovers: `SQLite.Interop.dll` copy items + `PreLoadSQLite_BaseDirectory`.
+9. Core goes net10-only (no net48 leg left to serve); `Catalog/NetFxCompat.cs` dies with Lib's
+   Catalog folder.
+10. Lifecycle: who starts the service for the hosted app (installed Windows service vs spawn)
+    - open; today Lib connects to the default pipe name (env `KHS_PIPE_NAME` overrides).
+
+Stays in Lib for good (host-process work, no data): window/popout/fullscreen, theme + tab
+mirror, clipboard, local-file hosting + Word->PDF via the live Word, paste/export via the live
+Word, Word thesaurus, diagnostics, HebrewBooks save-as/reveal, native pickers.
