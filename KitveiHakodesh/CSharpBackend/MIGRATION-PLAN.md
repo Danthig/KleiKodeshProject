@@ -1953,3 +1953,16 @@ nothing ships or references them from the product; delete when convenient. The s
 HttpHostServer is off in service mode. Index location is now the service's folder under the
 install root (was the install root for DocumentLocatorSvc) - the old `filesystemindex` is not
 migrated; the first run rebuilds.
+
+### Leg 3 follow-up - DocumentLocator folded into Core (2026-10-11)
+
+The DocumentLocator submodule (library, Service, Client, Demo, Tests) is removed from this
+repo; its GitHub repo is untouched and was clean and fully pushed at removal. The index logic
+lives in `KitveiHakodesh.Core/LocalFiles/`: `LocalFileIndex` (was PathIndex),
+`LocalFileIndexMftCrawler`, `LocalFileIndexUsnJournal`, `LocalFileIndexDirectoryCrawler` (was
+FallbackCrawler), `LocalFileIndexExcludedFolders`. The service wrapper is
+`KitveiHakodeshService/LocalFiles/LocalFileIndexService` (was DocumentLocatorService). Now on
+Core's Lucene (beta00018, was 00016); the index is rebuilt on first run anyway (new location).
+The moved files are `#nullable disable` (never annotated); `Marshal.SizeOf/PtrToStructure` use the
+generic AOT-safe overloads. The RPC op names (`locateDocuments`, `resetDocumentLocatorIndex`, ...)
+are unchanged: they are the wire contract.
