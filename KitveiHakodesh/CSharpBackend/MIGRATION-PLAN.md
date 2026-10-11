@@ -1908,3 +1908,48 @@ references Dapper, Dapper.SqlBuilder and System.Data.SQLite and copies SQLite.In
 ThisAddIn.cs still sets PreLoadSQLite_BaseDirectory. Nothing uses them any more.
 
 Next leg: DocumentLocator (its own pipe + DocumentLocator.Client in Lib).
+
+# Leg 3 - one service: KitveiHakodeshSvc replaces DocumentLocatorSvc (2026-10-11)
+
+**Decided with the user:** no second service. KitveiHakodeshService is the installed Windows
+service and owns the NTFS file index (DocumentLocator library in-process, as dev always did).
+The x64 native-AOT service ships in EVERY installer variant (32-bit Office on 64-bit Windows runs
+it as a separate process; 32-bit Windows is not supported).
+
+**The session-0 problem and its answer.** A Windows service runs as SYSTEM: its HKCU is not the
+user's, its AppData has no library, it has no desktop. So:
+- `KitveiHakodesh.Core.Settings.UserProfile` is the one place Core asks "whose registry hive /
+  AppData"; AppSettingsRegistry, SeforimDbPathResolver, RegistryValueWatcher and AppFileLocator
+  go through it. Default = the process user.
+- In service mode (`Hosting/UserSessionBinding`) the service starts with ONLY a pipe listener;
+  the first client to connect is impersonated (`RunAsClient`), its token binds UserProfile
+  (RegOpenCurrentUser + SHGetKnownFolderPath), the connection is closed unanswered (the client
+  retries), and only then is the data host built. One user per service lifetime; the data host
+  restarting itself (DB path change) stops the service, and the next host starts it again.
+- Desktop-only ops (pickers, Word export/paste, open-in-default-app) are refused in service mode
+  (`WindowsServiceMode.IsDesktopOnlyOp`); the hosts do those themselves. Dev still spawns its own
+  console instance, so nothing changes there.
+- Pipes are created with an ACL (AuthenticatedUsers RW) so a user process can reach a SYSTEM pipe.
+
+**Registration:** `KitveiHakodeshService.exe --install | --uninstall` (`Hosting/ServiceRegistration`,
+ported from DocumentLocator.Service): LocalSystem, demand start, SERVICE_START granted to
+authenticated users. The hosts start it through the SCM (`KitveiHakodeshServiceLauncher`,
+ServiceController) and only spawn the exe when nothing is registered (dev / portable).
+
+**Installer:** `KitveiHakodeshServiceHelper` replaces `DocumentLocatorHelper` (shutdown op and
+reindex op over the pipe, hand-built MessagePack `{Op}` envelope; `--install` under runas = the
+one UAC prompt, normally a no-op on update). `LegacyServiceRetirement` now retires
+DocumentLocatorSvc. The package build publishes the service (native AOT, win-x64; vswhere must be
+on PATH) into `KitveiHakodeshService\` under the install root; its indexes/caches there are
+preserved on update. NSIS uninstall stops+deletes KitveiHakodeshSvc (and still the legacy one).
+
+**Lib / frontend:** file search, warm-up, index status, reset and the excluded-folders list all go
+through the pipe (`locateDocuments` etc.); `FileSystemSearch/*`, `DocumentLocator.Client` and the
+WinForms excluded-folders manager are gone; the Vue dialog serves both runtimes.
+
+**Not done / to watch:** no live run yet of the installed service path (binding, ACL, SCM start).
+`DocumentLocator.Service`, `DocumentLocator.Client` and their tests still exist in the repo but
+nothing ships or references them from the product; delete when convenient. The service's
+HttpHostServer is off in service mode. Index location is now the service's folder under the
+install root (was the install root for DocumentLocatorSvc) - the old `filesystemindex` is not
+migrated; the first run rebuilds.
