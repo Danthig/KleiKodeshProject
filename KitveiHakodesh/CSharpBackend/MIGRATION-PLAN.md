@@ -1890,3 +1890,21 @@ the Core types it used):**
 Stays in Lib for good (host-process work, no data): window/popout/fullscreen, theme + tab
 mirror, clipboard, local-file hosting + Word->PDF via the live Word, paste/export via the live
 Word, Word thesaurus, diagnostics, HebrewBooks save-as/reveal, native pickers.
+
+### Leg 2 status - 2026-10-11, end of day
+
+DONE (commits 953e037d, e1e30b36, f4d5b6ea): slices 1-8. KitveiHakodeshLib, KitveiHakodeshDemoApp
+and UpdateCheckerLib reference no Core, SQLite, Lucene, FtsLib or MessagePack. Core is
+net10.0-windows only. The hosted page uses serviceClient.ts for every data op; streaming ops
+are pushed to the page as serviceStreamFrame / serviceStreamEnd events by ServiceRpcRelay.
+Lifecycle (slice 10): KitveiHakodeshServiceLauncher spawns KitveiHakodeshService.exe (owner-bound)
+when nothing listens on the pipe; the installer does not deploy the service yet.
+
+NOT verified live. The relay (one-shot and streaming), the launcher and the hosted DB-path flow
+have only been built, not run inside WebView2.
+
+Left for the user to decide (VSTO startup is off-limits without an OK): KleiKodeshVsto.csproj still
+references Dapper, Dapper.SqlBuilder and System.Data.SQLite and copies SQLite.Interop.dll;
+ThisAddIn.cs still sets PreLoadSQLite_BaseDirectory. Nothing uses them any more.
+
+Next leg: DocumentLocator (its own pipe + DocumentLocator.Client in Lib).
