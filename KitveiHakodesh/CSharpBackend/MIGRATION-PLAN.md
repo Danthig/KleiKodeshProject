@@ -667,7 +667,7 @@ Service wins and Lib is adjusted — with the documented exceptions in section 7
    (`Catalog`, `DbChangeStamp`) in 6 and 7.
 
 0b. **ONE copy of every shipped database. No duplicates, anywhere, ever.**
-   A binary asset lives in exactly one place — `Core/Resources/` — and every consumer
+   A binary asset lives in exactly one place — its owning project (Core: `Dictionary/`, `HebrewBooks/`) — and every consumer
    reaches it through Core. No "keep them identical" rule, no importer writing two files,
    no second copy under `public/`. If a consumer seems to need its own copy, that is a
    delivery problem to solve, not a copy to create. Today: `HebrewBooks.db` has **3**
@@ -887,7 +887,7 @@ Service wins and Lib is adjusted — with the documented exceptions in section 7
 | HebrewBooks catalog | `HebrewBooksDb` | Lib `HebrewBooksDb` + Service `HebrewBooksService` |
 | DB change detection | `DbFileFingerprint`, `DbChangeWatcher` | Service `Common/*` |
 | **Reusable toolkit** | see section 1 (`Common/`) | SQLite native loading, update checking, Office/Word COM, fonts, env probes, logging, shell registration |
-| **Bundled databases** | `Core/Resources/` | `Dictionary.db`, `HebrewBooksCatalog.db` |
+| **Bundled databases** | `Core/Dictionary/`, `Core/HebrewBooks/` | `Dictionary.db`, `HebrewBooksCatalog.db` |
 
 File search (`DocumentLocatorAdapter` in Lib, `DocumentLocatorService` in the Service) lands
 in **slice 9**, which also absorbs the `DocumentLocator` library itself into this repo and
@@ -1098,7 +1098,7 @@ independently), `IsValidUtf8`, the `?` placeholder rewriter, the niqqud normaliz
 `ZayitDb` vs `DbAccess` vs `SeforimDbService` (three corpus readers), the cross-process build
 lock (two primitives), `HebrewBooks.db` (**3** byte-identical copies, one an orphan in no
 csproj), `Dictionary.db` (**2** copies, verified identical, one with no reader).
-All resolved by rule 0b: one copy, in `Core/Resources/`.
+All resolved by rule 0b: one copy, in Core (`Core/Dictionary/`, `Core/HebrewBooks/`).
 
 ### Do NOT unify
 
@@ -1214,7 +1214,7 @@ Pure backend merge, **zero frontend change** (raw SQL stays by design).
 
 ### Slice 2 — Dictionary
 - Service `DictionaryService` → `Core/Dictionary/DictionaryDbQueries` (9 typed methods);
-  `Dictionary.db` → `Core/Resources/`
+  `Dictionary.db` → `Core/Dictionary/`
 - Gather its 8 SQL statements as `const`s at the top of the queries file — 3 already are;
   no separate SQL file (rule 9). Fold in
   `dictionaryDb.sql.ts`
@@ -1230,7 +1230,7 @@ Pure backend merge, **zero frontend change** (raw SQL stays by design).
 
 ### Slice 3 — HebrewBooks
 - Lib `HebrewBooksDb` + Service `HebrewBooksService` → `Core/HebrewBooks/HebrewBooksCatalogDbQueries`;
-  the DB → `Core/Resources/HebrewBooksCatalog.db`
+  the DB → `Core/HebrewBooks/HebrewBooksCatalog.db`
 - SQL stays inline as a `const` — 1 statement, built dynamically (rule 9 threshold)
 
 - **RESTORE the catalog updater** as `HebrewBooksCatalogUpdater`. Recovered from
