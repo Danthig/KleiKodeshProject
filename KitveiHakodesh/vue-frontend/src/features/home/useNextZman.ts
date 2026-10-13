@@ -4,6 +4,7 @@ import { CITIES } from '@/features/hebrew-calendar/calendarTypes'
 import type { CalendarZmanim, City } from '@/features/hebrew-calendar/calendarTypes'
 import { lsGet } from '@/utils/persistence'
 import { ZMANIM_CITY_KEY } from '@/features/hebrew-calendar/useZmanim'
+import type { DayZmanim } from '@/features/hebrew-calendar/itimLabinaZmanim'
 
 const KEYS = { SETTINGS_ZMANIM_CITY: ZMANIM_CITY_KEY } as const
 
@@ -80,6 +81,8 @@ export interface NextZman {
   key: keyof CalendarZmanim
   label: string
   time: Date
+  /** As the Itim Labina luach prints it. */
+  printed: string
   /** Minutes until the zman (>= 0). */
   minutesUntil: number
   urgency: ZmanUrgency
@@ -90,7 +93,7 @@ export interface NextZman {
 export interface ZmanRow {
   key: keyof CalendarZmanim
   label: string
-  time: string // formatted HH:mm, or '—'
+  time: string // as the Itim Labina luach prints it, or '—'
   isNext: boolean
   passed: boolean
 }
@@ -104,17 +107,11 @@ function resolveCity(): City {
   return CITIES[0]! // Jerusalem
 }
 
-function fmt(d: Date): string {
-  return d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false })
-}
-
-type ZmanDates = Record<keyof CalendarZmanim, Date | null>
-
 /**
  * Tracks the nearest upcoming zman for the home date bar and exposes the full
  * day's table for the "all times" popup.
  *
- * Load-time safety: the heavy @hebcal/noaa + @hebcal/core zmanim engine is
+ * Load-time safety: the heavy Itim Labina zmanim engine (kosherZmanim) is
  * pulled in via a dynamic import fired in onMounted (mirroring homeDateInfo),
  * so it never lands in the home page's eager bundle and never blocks first
  * paint. Until it resolves, `next` and `rows` are empty and the bar renders
@@ -125,12 +122,12 @@ export function useNextZman() {
   const city = ref<City>(CITIES[0]!)
 
   // Lazily-loaded engine + per-day cached Date computations.
-  let calc: ((city: City, date: Date) => ZmanDates) | null = null
+  let calc: ((city: City, date: Date) => DayZmanim) | null = null
   const ready = ref(false)
 
   let cachedDayKey = ''
-  let cachedToday: ZmanDates | null = null
-  let cachedTomorrow: ZmanDates | null = null
+  let cachedToday: DayZmanim | null = null
+  let cachedTomorrow: DayZmanim | null = null
 
   function ensureDay(reference: Date) {
     if (!calc) return
@@ -155,22 +152,23 @@ export function useNextZman() {
     // passed, so the bar always has an upcoming zman to show.
     for (const src of [cachedToday, cachedTomorrow]) {
       for (const { key } of ZMAN_ORDER) {
-        const t = src[key]
+        const zman = src[key]
         const label = NEXT_LABELS[key]
-        if (!t || !label) continue
+        if (!zman || !label) continue
+        const t = zman.time
         if (t.getTime() > current.getTime()) {
           const minutesUntil = Math.max(0, Math.round((t.getTime() - current.getTime()) / 60000))
           const urgency: ZmanUrgency =
             minutesUntil <= IMMINENT_MIN ? 'imminent' : minutesUntil <= SOON_MIN ? 'soon' : 'normal'
           const flash = urgency === 'imminent' && CRITICAL_KEYS.has(key)
-          return { key, label, time: t, minutesUntil, urgency, flash }
+          return { key, label, time: t, printed: zman.printed, minutesUntil, urgency, flash }
         }
       }
     }
     return null
   })
 
-  const displayTime = computed(() => (next.value ? fmt(next.value.time) : null))
+  const displayTime = computed(() => next.value?.printed ?? null)
 
   /**
    * Today's צאת הכוכבים — exposed so the home date bar can roll the Hebrew date
@@ -179,7 +177,7 @@ export function useNextZman() {
   const tzeit = computed<Date | null>(() => {
     if (!ready.value) return null
     ensureDay(now.value)
-    return cachedToday?.tzeit ?? null
+    return cachedToday?.tzeit?.time ?? null
   })
 
   /** Full day table for the popup — every zman, marking the next + the passed. */
@@ -193,14 +191,15 @@ export function useNextZman() {
     // once all of today's zmanim have passed (post-tzeit the date display has
     // advanced too, so the popup stays consistent with the bar and the row of
     // the next zman is actually present to highlight).
-    const fromTomorrow = !!n && cachedToday![n.key]?.getTime() !== nextTime
+    const fromTomorrow = !!n && cachedToday![n.key]?.time.getTime() !== nextTime
     const day = fromTomorrow && cachedTomorrow ? cachedTomorrow : cachedToday!
     return ZMAN_ORDER.map(({ key, label }) => {
-      const t = day[key]
+      const zman = day[key]
+      const t = zman?.time
       return {
         key,
         label,
-        time: t ? fmt(t) : '—',
+        time: zman ? zman.printed : '—',
         // Match by exact instant, not key, so a rolled-over next zman can never
         // highlight a same-named row from the wrong day.
         isNext: !!t && t.getTime() === nextTime,
@@ -212,12 +211,9 @@ export function useNextZman() {
   onMounted(async () => {
     city.value = resolveCity()
     cachedDayKey = '' // force rebuild against the resolved city
-    // Deferred load — keeps hebcal out of the home page's critical bundle.
-    const [{ GeoLocation }, { Zmanim }] = await Promise.all([
-      import('@hebcal/noaa'),
-      import('@hebcal/core/dist/esm/zmanim'),
-    ])
-    calc = (c, date): ZmanDates => {
+    // Deferred load — keeps the zmanim engine out of the home page's critical bundle.
+    const { itimLabinaDayZmanim } = await import('@/features/hebrew-calendar/itimLabinaZmanim')
+    calc = (c, date): DayZmanim => {
       const empty = {
         chatzotNight: null,
         alot: null, misheyakir: null, sunrise: null, sofShmaGra: null, sofShmaMga: null,
@@ -225,25 +221,7 @@ export function useNextZman() {
         minchaKetana: null, plag: null, sunset: null, tzeit: null,
       }
       try {
-        const gloc = new GeoLocation(c.name, c.lat, c.lng, c.elevation, c.tzid)
-        const z = new Zmanim(gloc, date, false)
-        const norm = (d: Date | null) => (d && !isNaN(d.getTime()) ? d : null)
-        return {
-          chatzotNight: norm(z.chatzotNight()),
-          alot: norm(z.alotHaShachar()),
-          misheyakir: norm(z.misheyakir()),
-          sunrise: norm(z.sunrise()),
-          sofShmaGra: norm(z.sofZmanShma()),
-          sofShmaMga: norm(z.sofZmanShmaMGA()),
-          sofTfillaGra: norm(z.sofZmanTfilla()),
-          sofTfillaMga: norm(z.sofZmanTfillaMGA()),
-          chatzot: norm(z.chatzot()),
-          minchaGedola: norm(z.minchaGedola()),
-          minchaKetana: norm(z.minchaKetana()),
-          plag: norm(z.plagHaMincha()),
-          sunset: norm(z.sunset()),
-          tzeit: norm(z.tzeit()),
-        }
+        return itimLabinaDayZmanim(c, date)
       } catch {
         return empty
       }
