@@ -14,6 +14,7 @@
 import { onScopeDispose, ref, watch } from 'vue'
 import { getWordLinkAnchorsForLines, getWordLinkTargetsForBook } from '@/webview-host/seforimApi'
 import { buildWordLinkTreatments, type WordLinkTreatment } from './wordLinkAnchors'
+import { getConnectionTypeName, normalizeConnectionTypeName } from '../commentary/commentaryConnectionTypes'
 import type { WordLinkAnchor } from '@/webview-host/queries.types'
 
 const EMPTY: WordLinkAnchor[] = []
@@ -79,7 +80,11 @@ export function useWordLinkAnchors(getVisibleLineIds?: () => number[]) {
           treatmentsByBook.delete(sourceBookId)
           return new Map<number, WordLinkTreatment>()
         }
-        return buildWordLinkTreatments(targets)
+        // Pass a connection type mapper for Ein Mishpat prioritization
+        return buildWordLinkTreatments(targets, (typeId) => {
+          const dbName = getConnectionTypeName(typeId)
+          return normalizeConnectionTypeName(dbName)
+        })
       })
       .catch(() => {
         // Transport error (dev service call) — same retry contract as a null result.
@@ -123,6 +128,9 @@ export function useWordLinkAnchors(getVisibleLineIds?: () => number[]) {
           if (t.open != null) {
             row.encOpen = t.open
             row.encClose = t.close
+          }
+          if (t.underline) {
+            ;(row as any).decoration = 'underline'
           }
         }
       }

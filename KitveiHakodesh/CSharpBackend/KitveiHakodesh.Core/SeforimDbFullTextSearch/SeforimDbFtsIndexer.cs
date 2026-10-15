@@ -3,6 +3,9 @@ using System.IO;
 using System.Threading;
 using FtsLib.Indexing;
 using FtsLib.SeforimDb;
+// TEMPORARY (FTS5 trial): Core runs on SQLite FTS5 instead of FtsLib's own index.
+// Delete this alias to switch back. See FtsLib/Fts5/Fts5SeforimIndex.cs.
+using SeforimIndex = FtsLib.Fts5.Fts5SeforimIndex;
 using KitveiHakodesh.Core.SeforimDb;
 
 namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
@@ -44,12 +47,20 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         // fts2 (2026-07-22): tokenizer change — inline tags (<b>, <small>, …) became
         // word-transparent and HTML entities word separators, so terms indexed under fts1
         // differ and a clean rebuild is required.
-        public const string IndexFormatVersion = "fts2";
+        // fts3 (2026-10-12): the index is SQLite FTS5 (FtsLib/Fts5) instead of FtsLib's own
+        // segments — a different on-disk format, so every fts2 index rebuilds.
+        // fts4 (2026-10-12): lines are stored in catalog tree order (rowid = position), so
+        // results stream in the order the app shows the library; fts3 rowids were line ids.
+        public const string IndexFormatVersion = "fts4";
 
         private const string CompletedStampFileName = "fts.ver";
         private const string StartedStampFileName = "fts.src";
         private const string ResumeWatermarkFileName = "build.progress";
-        private const string SegmentFilePattern = "seg_*.dat";
+        // TEMPORARY (FTS5 trial): FtsLib's pattern is "seg_*.dat".
+        private const string SegmentFilePattern = SeforimIndex.IndexFileName;
+        // TEMPORARY (FTS5 trial): FtsLib's own segment files. Finding one means the folder
+        // holds an index of the OLD engine, whatever its stamps say — see Prepare.
+        private const string FtsLibSegmentFilePattern = "seg_*.dat";
 
         /// <summary>Progress is reported every this-many lines — often enough for a live
         /// percentage, rare enough that the callback never becomes the build's cost.</summary>
@@ -80,8 +91,26 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
 
         public string IndexPath => _indexPath;
 
+        private bool HasFtsLibSegments()
+        {
+            try
+            {
+                return Directory.Exists(_indexPath)
+                    && Directory.GetFiles(_indexPath, FtsLibSegmentFilePattern).Length > 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         /// <summary>Whether any searchable segment exists yet — what "results before the build
         /// finishes" is gated on.</summary>
+        /// <summary>A finished build is on disk (its completion stamp and its index file) — whether
+        /// it still matches the database is <see cref="IsIndexStale"/>'s question.</summary>
+        public bool HasCompletedIndex() =>
+            File.Exists(Path.Combine(_indexPath, CompletedStampFileName)) && SegmentsExist();
+
         public bool SegmentsExist()
         {
             try
@@ -119,6 +148,22 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         public SeforimDbFtsIndexPlan Prepare()
         {
             var plan = new SeforimDbFtsIndexPlan();
+
+            // TEMPORARY (FTS5 trial): an index built by FtsLib's own engine is unusable here,
+            // whatever its stamps claim. The format bump to fts4 catches every stamped one; this
+            // catches the rest — no stamp, a legacy stamp, or a half-built FtsLib index — which
+            // the checks below would not even see as index state, because SegmentFilePattern
+            // now names the FTS5 file. Left in place it would also hold ~650 MB of dead segments.
+            // Only while the engine is NOT FtsLib's own: removing the SeforimIndex alias makes
+            // SegmentFilePattern "seg_*.dat" again and switches this off by itself — otherwise it
+            // would wipe every valid FtsLib index on every start.
+            if (SegmentFilePattern != FtsLibSegmentFilePattern && HasFtsLibSegments())
+            {
+                Directory.Delete(_indexPath, recursive: true);
+                plan.WipedStaleState = true;
+                plan.IsReady = false;
+                return plan;
+            }
 
             string completedStampPath = Path.Combine(_indexPath, CompletedStampFileName);
             string currentStamp = SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
@@ -163,15 +208,35 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         /// is the orchestrator.</param>
         /// <param name="onProgress">(linesIndexedSoFar, totalLines) — already resume-adjusted,
         /// reported every <see cref="ProgressReportInterval"/> lines.</param>
+        /// <param name="onTotalKnown">The corpus size, as soon as it is known and BEFORE any
+        /// indexing starts. A host that draws a progress bar needs it even when no line tick
+        /// ever fires — a corpus smaller than <see cref="ProgressReportInterval"/> finishes
+        /// without one, and the merge phase would then report a total of zero.</param>
         /// <param name="onSegmentFlushed">A segment just reached disk — from the first of
         /// these on, the index answers searches.</param>
+        /// <param name="isStillCurrent">Asked once, after the build succeeds and BEFORE the
+        /// completion stamp is written. A host that can supersede a build — an app reset
+        /// starting a replacement — answers false for the old one, and nothing is recorded.
+        /// Writing the stamp anyway would mark the NEW build's directory as a finished index of
+        /// the OLD build's content, and the next launch would skip the rebuild entirely.
+        /// Defaults to "always current", which is correct for a host that never supersedes.</param>
+        /// <param name="onMergeProgress">(passesDone, passesExpected) during the final phase
+        /// after the last line (a force merge, or FTS5's compaction and term dictionary). That
+        /// phase reports no LINES, so without these ticks a host can only hold its last line
+        /// percentage for minutes and the build reads as hung. passesDone = 0 is the
+        /// phase-start signal, sent before any work; FtsLib's merger sends (0, 0) and an
+        /// estimate that moves as it learns how much is left, FTS5 sends 0..2 of 2.</param>
         public bool Build(
-            SeforimIndex index,
+            SeforimDbFtsEngine engine,
             Action<long, long>? onProgress = null,
             Action? onSegmentFlushed = null,
+            Action<int, int>? onMergeProgress = null,
+            Action<long>? onTotalKnown = null,
+            Func<bool>? isStillCurrent = null,
             CancellationToken cancellationToken = default)
         {
-            if (index == null) throw new ArgumentNullException(nameof(index));
+            if (engine == null) throw new ArgumentNullException(nameof(engine));
+            var index = engine.Index;
 
             Directory.CreateDirectory(_indexPath);
 
@@ -186,6 +251,7 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
             // session so resuming never rescans the corpus just to size the progress bar.
             index.GetResumeState(out _, out long cachedTotal, out long resumeOffset);
             long total = cachedTotal > 0 ? cachedTotal : index.CountLines();
+            onTotalKnown?.Invoke(total);
 
             bool completed;
             for (int attempt = 0; ; attempt++)
@@ -208,14 +274,29 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
                         // Lowest CPU + very-low I/O priority for the whole build, so it
                         // never contends with searches or the other index rebuilds that
                         // run alongside it. Same policy as both current hosts.
-                        backgroundPriority: true);
+                        backgroundPriority: true,
+                        onMergeProgress: onMergeProgress);
                     break;
                 }
                 catch (IndexWriteLockException) when (attempt < WriteLockRetries)
                 {
                     Thread.Sleep(WriteLockRetryDelay);
                 }
+                catch (IndexWriteLockException ex)
+                {
+                    // Retries exhausted. Rethrown as Core's own type so a host can decide what
+                    // to do — re-arm and resume later, typically — without having to reference
+                    // the engine library to name the exception.
+                    throw new SeforimDbFtsIndexLockedException(
+                        "The full-text index write lock is still held after " + WriteLockRetries
+                        + " retries.", ex);
+                }
             }
+
+            // A superseded build has had its segments deleted by whatever replaced it, so there
+            // is nothing left of it to record — and recording it would be actively wrong.
+            if (completed && isStillCurrent != null && !isStillCurrent())
+                return completed;
 
             if (completed)
             {

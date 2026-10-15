@@ -19,6 +19,9 @@ import type { CommentarySlot, PinnedCommentaryGroup } from '../bookViewTypes'
 import { useVirtualScrollerKeys } from '@/composables/useVirtualScrollerKeys'
 import { useCommentaryScroll } from './useCommentaryScroll'
 import { useCommentaryCopy } from './useCommentaryCopy'
+import { useCommentaryErrorReport } from '../errorReport/useCommentaryErrorReport'
+import BookViewErrorReportDialog from '../errorReport/BookViewErrorReportDialog.vue'
+import { useVirtualizedTextSelection } from '@/composables/useVirtualizedTextSelection'
 import type { Highlight } from '../lines/useBookViewHighlights'
 import type { Note } from '../lines/useBookViewNotes'
 import BookViewNoteBubble from '../lines/BookViewNoteBubble.vue'
@@ -31,6 +34,7 @@ import BookViewAbbrevTooltip from '../lines/BookViewAbbrevTooltip.vue'
 import { useBookViewAbbrevTooltip } from '../lines/useBookViewAbbrevTooltip'
 import { useBooksDataStore } from '@/stores/booksDataStore'
 import { pasteIntoWord } from '@/webview-host/bridge'
+import { teamimFontStyle } from '@/utils/teamimFont'
 
 const props = defineProps<{
   /**
@@ -51,8 +55,16 @@ const props = defineProps<{
   loadError?: boolean
   // Hoisted annotation & render state — initialized in useBookView, survive v-if toggle
   getHighlightsForLine: (lineId: number) => Highlight[]
-  applyHighlight: (lineId: number, startOffset: number, endOffset: number, colorArgb: number) => void
-  clearHighlight: (lineId: number, startOffset: number, endOffset: number) => void
+  // Promise-returning: both persist to the settings database before mutating the
+  // reactive state that re-renders the lines, and the selection restore has to wait
+  // for that (see restoreSelectionAfterAnnotation in useCommentaryCopy).
+  applyHighlight: (
+    lineId: number,
+    startOffset: number,
+    endOffset: number,
+    colorArgb: number,
+  ) => Promise<void>
+  clearHighlight: (lineId: number, startOffset: number, endOffset: number) => Promise<void>
   getNotesForLine: (lineId: number) => Note[]
   scheduleNotesLoad: (lineIds: number[]) => void
   // Viewport-driven lazy load of word-level link anchors (link_anchor, schema v2+ DBs).
@@ -70,6 +82,11 @@ const props = defineProps<{
   deleteNote: (note: Note) => Promise<void>
   commentaryFontPx: number
   renderContent: (content: string, flatIndex: number, lineId: number | undefined, searchQuery: string | undefined) => string
+  /**
+   * How many annotation offsets a line's model content spans. Comes from the renderer
+   * because the offset space is the text after its diacritics and censor transforms.
+   */
+  annotationOffsetLengthOf: (content: string) => number
   setCurrentMark: (scroller: HTMLElement, flatIndex: number, occurrence: number) => void
   commentaryTocPaths: Map<string, string>
   searchQuery?: string
@@ -184,12 +201,27 @@ useContextMenuLongPress(scrollerEl, (event) => {
   contextMenuRef.value?.showAtPosition(event.clientX, event.clientY)
 })
 
+// Keeps the rows holding a selection's two ends mounted however far they scroll
+// away, so a drag past the viewport edge cannot break the selection.
+const {
+  rangeExtractor: selectionRangeExtractor,
+  selectedRowIndexRange,
+  restoreSelectionFromPinnedRows,
+} = useVirtualizedTextSelection(
+  scrollerEl,
+  // Which groups are shown, not just how many rows they add up to: a filter change
+  // that swaps one group for another of equal length leaves the count untouched while
+  // every row index comes to mean a different line.
+  () => visibleGroups.value.map(commentaryGroupKey).join('|'),
+)
+
 const virtualizer = useVirtualizer(
   computed(() => ({
     count: flatItems.value.length,
     getScrollElement: () => scrollerEl.value,
     estimateSize: (i) => (flatItems.value[i]?.type === 'header' ? 40 : 48),
     overscan: 10,
+    rangeExtractor: selectionRangeExtractor.value,
   })),
 )
 
@@ -304,6 +336,32 @@ function buildAllCommentaryContentHtml(): string {
   return parts.join('')
 }
 
+/**
+ * The same rendered markup as buildAllCommentaryContentHtml, but only for the flat
+ * items in [firstIndex, lastIndex] — the rows a selection spans. Lets a copy include
+ * the selected rows that scrolled out of the virtualized window (and so are not in
+ * the DOM to be serialized), headers included, in their true reading order.
+ */
+function buildCommentaryContentHtmlForRange(firstIndex: number, lastIndex: number): string {
+  const parts: string[] = []
+  let flatIndex = 0
+  for (const g of visibleGroups.value) {
+    if (flatIndex >= firstIndex && flatIndex <= lastIndex) {
+      parts.push(`<div class="line">${g.bookTitle}</div>`)
+    }
+    flatIndex++
+    for (const l of g.lines) {
+      if (flatIndex > lastIndex) return parts.join('')
+      if (flatIndex >= firstIndex) {
+        const rendered = props.renderContent(l.content, flatIndex, l.lineId, props.searchQuery)
+        parts.push(`<div class="line" data-line-id="${l.lineId}">${rendered}</div>`)
+      }
+      flatIndex++
+    }
+  }
+  return parts.join('')
+}
+
 const { contextMenuItems, buildFormattedHtml: buildCommentaryFormattedHtml, onCopy: onCommentaryCopy, onPasteIntoWord: onCommentaryPasteIntoWord, onSearchInRepository: onCommentarySearchInRepository } = useCommentaryCopy(
   () => {
     const pinned = activePinnedGroup.value
@@ -322,9 +380,11 @@ const { contextMenuItems, buildFormattedHtml: buildCommentaryFormattedHtml, onCo
   (lineId, startOffset, endOffset, colorArgb) =>
     props.applyHighlight(lineId, startOffset, endOffset, colorArgb),
   (lineId, startOffset, endOffset) => props.clearHighlight(lineId, startOffset, endOffset),
+  // Returns the write's promise so the selection restore runs after the note has
+  // landed and re-rendered its line, not before.
   (lineId, startOffset, endOffset, quote) =>
     props.createNote(lineId, startOffset, endOffset, quote).then((note) => {
-      nextTick(() => {
+      void nextTick(() => {
         const marker = scrollerEl.value?.querySelector(
           `[data-note-id="${note.id}"]`,
         ) as HTMLElement | null
@@ -342,7 +402,46 @@ const { contextMenuItems, buildFormattedHtml: buildCommentaryFormattedHtml, onCo
         resolveWordLinkTarget: props.resolveWordLinkTarget,
       }
     : undefined,
+  {
+    selectedRowIndexRange,
+    buildContentHtmlForRange: buildCommentaryContentHtmlForRange,
+    restoreSelectionFromPinnedRows,
+    lineAtRowIndex: (rowIndex) => {
+      const item = flatItems.value[rowIndex]
+      if (!item || item.type !== 'line') return null
+      return { lineId: item.lineId, offsetLength: props.annotationOffsetLengthOf(item.content) }
+    },
+  },
+  () => openCommentaryErrorReport(),
 )
+// A commentary line belongs to the commentary book its group came from, never to the
+// base book this pane is attached to — so the report's identity is looked up from the
+// groups rather than taken from the surrounding view.
+const {
+  target: commentaryErrorReportTarget,
+  openErrorReport: openCommentaryErrorReport,
+  closeErrorReport: closeCommentaryErrorReport,
+  awaitSourceResolution: awaitCommentaryErrorReportSource,
+} = useCommentaryErrorReport({
+  scrollerEl,
+  findLine: (lineId) => {
+    for (const group of visibleGroups.value) {
+      const line = group.lines.find((l) => l.lineId === lineId)
+      if (line) {
+        return {
+          bookId: group.bookId,
+          bookTitle: group.bookTitle,
+          // The group's own path already reads "book · section · category"; the copy
+          // menu flattens that separator for a citation, so the report does too.
+          reference: (group.path ?? group.bookTitle).split(' · ').join(' '),
+          line: { lineId: line.lineId, lineIndex: line.lineIndex, content: line.content },
+        }
+      }
+    }
+    return null
+  },
+})
+
 useScopedCopy(
   scrollerEl,
   () => visibleGroups.value.flatMap((g) => g.lines.map((l) => l.content)),
@@ -441,6 +540,19 @@ const { abbrevTooltip } = useBookViewAbbrevTooltip(scrollerEl)
       selection can tell the two panels apart; both carry .commentary-view.
     -->
     <ContextMenu ref="contextMenuRef" :items="contextMenuItems" />
+    <BookViewErrorReportDialog
+      v-if="commentaryErrorReportTarget"
+      :selected-text="commentaryErrorReportTarget.selectedText"
+      :original-line="commentaryErrorReportTarget.originalLine"
+      :selection-offset="commentaryErrorReportTarget.selectionOffset"
+      :book-title="commentaryErrorReportTarget.bookTitle"
+      :current-ref="commentaryErrorReportTarget.reference"
+      :line-index="commentaryErrorReportTarget.lineIndex"
+      :book-id="commentaryErrorReportTarget.bookId"
+      :source="commentaryErrorReportTarget.source"
+      :await-source="awaitCommentaryErrorReportSource"
+      @close="closeCommentaryErrorReport"
+    />
     <BookViewNoteBubble
       v-if="activeBubbleNote && activeBubbleAnchorRect"
       :note="activeBubbleNote"
@@ -548,6 +660,7 @@ const { abbrevTooltip } = useBookViewAbbrevTooltip(scrollerEl)
                 class="line"
                 :class="{ 'line-no-text': (flatItems[vItem.index] as any).lineId === -1 }"
                 :data-line-id="(flatItems[vItem.index] as any).lineId"
+                :style="teamimFontStyle((flatItems[vItem.index] as any).content)"
                 v-html="renderContent((flatItems[vItem.index] as any).content, vItem.index, (flatItems[vItem.index] as any).lineId, props.searchQuery)"
               />
             </div>
@@ -771,11 +884,10 @@ html[data-fixed-line-height='true'] .line :deep(.word-link-marker) {
 .line :deep(.word-link:hover) {
   text-decoration-color: currentColor;
 }
-/* Colored per commentary via --wl-marker-color (palette in main.css), muted by
-   opacity so the marks don't compete with the text; hover restores the affordance. */
+/* Muted by opacity so the marks don't compete with the text; hover restores the
+   affordance. All markers share the same color (--text-secondary fallback). */
 .line :deep(.word-link-marker) {
-  font-size: 0.72em;
-  vertical-align: super;
+  font-size: 0.6em;
   line-height: 1;
   color: var(--wl-marker-color, var(--text-secondary));
   opacity: 0.65;

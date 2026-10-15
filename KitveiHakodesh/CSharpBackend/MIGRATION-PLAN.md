@@ -3,7 +3,160 @@
 Consolidating the duplicated logic in `KitveiHakodeshLib` (net48, WebView2 host) and
 `KitveiHakodeshService` (net10, dev service) into one shared project: **`KitveiHakodesh.Core`**.
 
-Status: planning complete, no code migrated yet. Baseline branch: `pre-migration-baseline`.
+Status: **the Service is now wired to Core** (2026-10-07). Baseline branch: `pre-migration-baseline`.
+
+### Where the migration actually stands
+
+> ## ✅ BACKEND UNIFICATION COMPLETE (2026-10-07)
+> Every behaviour both apps share now has ONE implementation. Audited by grepping for each
+> behaviour's distinguishing identifier; the only multi-file hits left are the ones below, each
+> architecturally forced and each now documented in the code so it is not "fixed" later:
+>
+> | Looks duplicated | Why it is not |
+> |---|---|
+> | Word automation ×3 (Lib / DocConvertLib / Core) | the Lib reuses the live Word the VSTO add-in runs INSIDE; DocConvertLib uses manual COM because ILC cannot load the Office PIA; Core uses the PIA on its net48 leg |
+> | The severed-channel HRESULT list ×2 | Core's Word files are `<Compile Remove>`d from its net10 leg, so DocConvertLib's modern leg cannot reach them even though it references Core |
+> | DocumentLocator pipe vs in-process | only Local System can read the USN journal, and the pipe is what keeps the per-user app from needing elevation |
+>
+> **The raw-SQL bridge is retired too (2026-10-07).** `KitveiHakodeshLib/Db/SeforimQueryHandler`
+> answers the SAME 33 operation names the dev service does, through the same Core methods, so
+> `seforimApi.ts` is one call per capability instead of a dev branch and a hosted branch.
+> `queries.sql.ts` is off every live path — the only file still importing it is
+> `bookCatalogSearchTocHeuristics.ts`, a retained fallback that nothing imports.
+>
+> ⚠ **Two traps that bridge hit, worth knowing before adding another typed action:**
+> - **Casing.** `WebBridge.Reply` serializes with no naming policy, so a typed C# model goes out
+>   PascalCase while the frontend row types are camelCase (the SQL used to select camelCase
+>   aliases). The dev transport converts on decode in `serviceClient.ts`; a hosted action that
+>   returns a Core model must do the same, or every field reads back `undefined`.
+> - **Reserved argument names.** `JsBridge.post` builds the message as
+>   `Object.assign({ id }, payload)`, so an argument spread onto the root called `id` overwrites
+>   the correlation id and the reply can never be routed back — the call hangs forever and the
+>   throw is swallowed in the message loop. `seforimQuery` nests its arguments under `params`
+>   for exactly this reason; `getBookById` takes an `id`.
+>
+> **The dictionary followed (2026-10-07)**: `DictionaryQueryHandler` answers the same nine
+> lookups the dev service does. Two of them did real work in the page — `dictAbbrevSenses`
+> walked the candidate list a query at a time twice over, and `dictSpellCandidates` issued two
+> fragment queries and merged them — and both loops already existed in Core.
+>
+> **User annotations stay raw SQL ON PURPOSE** (typed methods for the read-only shipped corpus,
+> frontend-supplied SQL for user-owned mutable data). What was NOT on purpose: the hosted leg
+> ran that SQL with **no guard at all**, where the service has enforced the allowlist since
+> 2026-08-21 — a compromised page could ATTACH and write an arbitrary SQLite file. It now goes
+> through Core's `UserAnnotationStore`, so both legs are guarded, and the quote-aware `?` rewrite
+> replaces a plain `Regex.Replace` that mangled any note containing a question mark.
+>
+> **What is left, and why it is not a migration task:**
+> - `dict-sql` has NO frontend caller — dead, not pending.
+> - `sql` has ONE caller, `seforimDb.query()`, reached only from
+>   `bookCatalogSearchTocHeuristics.ts`, a retained fallback nothing imports.
+> - `HandleWikiDictSql` is routed from no action in the message switch.
+> - `queries.sql.ts` / `dictionaryDb.sql.ts` are off every live path.
+>
+> All four are DEAD CODE for the cleanup slice to delete, not duplicate implementations. The
+> Lib's remaining Dapper users are `DbAccess` (behind the dead `sql` action) and `HebrewBooksDb`;
+> retiring those removes the Dapper + System.Data.SQLite dependency entirely.
+
+> **The point is ONE implementation, not fewer lines.** A wrapper that stays long is fine; two
+> copies of the same algorithm are not. The measure of a slice is how many implementations of a
+> behaviour survive it — the catalog went 3 → 1, the fingerprint 3 → 1, expansion 3 → 1 — not
+> how much shorter a file got.
+
+
+Core was written slice by slice while `KitveiHakodeshService` kept its own copy of everything —
+so Core was complete but *nothing called it*. That second half is now done for the Service:
+
+| Area | State | Service file today |
+|---|---|---|
+| Dictionary | ✅ wired | `DictionaryService` — wrapper, 120 lines (was 242) |
+| HebrewBooks | ✅ wired | `HebrewBooksService` — wrapper, 130 lines (was 385) |
+| User annotations | ✅ wired | `UserSettingsService` — wrapper, 125 lines (was 275) |
+| Registry settings | ✅ deleted | Service copy gone; callers use `Core.Settings.AppSettingsRegistry` |
+| Seforim DB path | ✅ wired | `SeforimDbLocator` — 45-line adapter over `SeforimDbPathResolver` |
+| Seforim DB queries | ✅ wired | `SeforimDbService` — wrapper, 172 lines (was 101 + 864 + 531) |
+| Seforim row models | ✅ deduped | 33 duplicate types deleted; `GlobalUsings.cs` aliases Core's |
+| Catalog TOC (Lucene) | ✅ wired, **both legs** | `CatalogTocSearchService` (service) and `CatalogTocHandler` (Lib) over Core's one engine; 2,733 lines of duplicate deleted |
+| Related-form expansion | ✅ wired, **both legs** | one expander; the Lib's hand-maintained net48 twin and its "keep the two in sync" rule are gone |
+| Seforim-DB content fingerprint | ✅ wired, **both legs** | was THREE copies (Lib `FtsIndexState`, Service `DbContentStamp`, Core); now one |
+| FTS index BUILD + provenance | ✅ wired, **both legs** | one build loop, one set of stamps, one staleness check. The Lib's app-version gate retires — it rebuilt on every app update even when indexing had not changed; the precise question is Core's `IndexFormatVersion`, and a release that WANTS everyone to reindex has the installer's `-p:DeleteFtsIndex` switch |
+| FTS search execution | ✅ wired, **both legs** | snippets, the match + word-distance filters, short-snippet embellishment and enrichment all Core's. Each host keeps only its FLUSH RHYTHM: fixed 256-batches over a pipe for the service, doubling-then-timer (1,2,4,8,16 then 300ms) for the hosted app so the first result appears instantly |
+| Fonts | ✅ wired, **both legs** | was THREE DirectWrite enumerators; now one (`Common/HebrewFonts`, `#if` for the factory import) |
+| Updater | ✅ wired | the release model, version comparison, installed-version read and the **installer-variant rule** all Core's. `UpdateCheckerLib` keeps its WinForms/WPF progress + notification UI and the installer launch |
+| DocumentLocator | ✅ **nothing to do — see below** | the two paths are architecturally required, not duplicates |
+| KitveiHakodeshLib (rest of the hosted leg) | ✅ wired | Overtaken by the rows above: the Lib IS the second of the "both legs". Every data-touching file delegates to Core and owns no SQL — the only `SELECT`/`INSERT` text left in it is in comments describing the queries the FRONTEND supplies to the user-settings bridge. Lib's csproj references Core and no longer carries Dapper or System.Data.SQLite. What remains is genuinely host-only: WebView2 plumbing (`AppViewer*`, `JsBridge`, `ChromeTabsMirror`), the typed bridges (`SeforimQueryHandler`, `DictionaryQueryHandler`), and the net48 Word/PDF paths |
+
+**The pattern each wrapper follows**, and the rule that decides what stays behind:
+Core returns data or throws (rule 4); a transport decides what the user sees. So the wrapper
+keeps exactly three things — finding the database once, the host's ERROR POLICY (log and answer
+empty rather than let an exception reach the RPC loop), and translating Core's clearer model
+names into the frozen wire names the frontend already speaks. Everything else is delegation.
+
+> ### ⚠ WIRING A SLICE CAN SILENTLY REVERT A LATER FIX — CHECK EVERY TIME
+> Core was written slice by slice in **August**, while the Service kept being fixed afterwards.
+> So for any area, Core may predate a Service improvement, and "delegate to Core" then quietly
+> undoes it. This is invisible in the diff: the Service file shrinks and everything compiles.
+>
+> **Caught exactly this way in the SeforimDb slice** — `GetReverseLineData` / `GetReverseBooks`:
+> - Core hardcoded `l.baseProvenance`; the Service had learned (2026-08-27, `8146ebe8`) to probe
+>   which column the schema uses, because Zayit spells it `isDeclaredBase`. Core's version would
+>   have thrown "no such column" on every Zayit database.
+> - Core's corpus fallback dropped the `isBaseBook = 0` guard the Service added the same day
+>   (`8d5adb0f`, *"A tractate is nobody's commentary"*). Without it every unprovenanced commentary
+>   linking into a tractate is reported as that tractate's SOURCE.
+>
+> Both are now fixed in Core, with the declared-base column probed as part of `SeforimDbSchema`
+> (it is a schema fact, so it belongs with the other ones) rather than passed around as a string.
+>
+> **Already-known stale spots, found by running this check across every area (2026-10-07).**
+> Everything not listed came back clean — FTS, fonts, the updater, and
+> `SeforimDbContentFingerprint` (which is actually AHEAD of the service: it fingerprints a
+> schema-6 database with SQL `length(content)` where `DbContentStamp` still throws).
+>
+> | Core file | Written | Service/Lib fixed since | What would be lost |
+> |---|---|---|---|
+> | `SeforimDbCatalog/*` | 2026-08-25 | **5 commits**, 2026-08-26/27 | ✅ **PORTED 2026-10-07.** word-proximity ranking (`PathScratch`, `StableSortByProximity`), quoted-acronym ranking (`GetQuotedAbbreviationKey(s)`, `HitCarriesQuotedKey`), title/author outranking a category (`MatchesOnTitleOrAuthor`, `StableSortByFieldAccuracy`), and one abbreviation-map entry that had gained a second alternative. Note commit 3 REVERTS commit 2's index-side half, so the port is the final state: no `qa` field, no v21 bump — `IndexFormatVersion` stays `v20`, so no user rebuild |
+> | `Common/WordExporter.cs` | 2026-08-25 | `2d31de77`, 2026-09-16 | ⚠ **PARTLY RESOLVED 2026-10-07.** The part that was a real shared rule — "does this cached Word still ANSWER?" — is now in Core as `RunningWordFinder.IsAlive`/`IsDisconnected`, and the Lib calls it instead of keeping its own copy of the audited HRESULT list. The REST is not a duplicate at all: see below |
+
+> ### Word automation is THREE implementations ON PURPOSE — do not collapse them
+> Checked 2026-10-07. The instinct to unify these is wrong, and the reasons are not obvious:
+> - **`KitveiHakodeshLib/WordExporter`** (net48, 457 lines) reuses `WordToPdfConverter.HostApplication`
+>   — *the live Word the VSTO add-in is hosted inside*. A generic library must not know about that.
+>   Its `Describe()` maps HRESULTs to Hebrew user-facing text, which is presentation, not policy.
+> - **`DocConvertLib.AotWordPaste`** (net48 + net10) drives Word through manual COM/IDispatch
+>   because the Office PIA cannot load under native AOT. The service uses this one.
+> - **`Core/Common/WordExporter`** uses the PIA on its net48 leg and is currently UNUSED.
+>
+> What genuinely WAS duplicated is the liveness rule, and that is the piece that moved. Note the
+> trap in it: `0x80010005` (RPC_E_CANTCALLOUT_INEXTERNALCALL) is a BUSY, alive Word. Listing a busy
+> code as "dead" discards the user's own Word and starts a second one beside it.
+>
+> If `Core/Common/WordExporter` is ever adopted, `RunningWordFinder.HostApplication` has to be set
+> at VSTO startup (`KleiKodeshVsto/ThisAddIn.cs` already sets two other such properties) — that is
+> a VSTO-startup change and needs sign-off before anyone makes it.
+>
+> `KitveiHakodeshLib/Settings/AppSettings.cs` also moved on 2026-08-27, but Core already
+> matches it (empty stored value means "no choice"), so that one is fine.
+
+> **The check to run before wiring any area**, not after:
+> ```
+> git log --since=<date Core's files for that area were written> -- KitveiHakodeshService/<area>
+> ```
+> and diff the SQL / behaviour rather than trusting that Core "is the same thing". A text diff of
+> the SQL strings, normalised for the helper renames, finds these in minutes; reading the two
+> files side by side does not.
+
+**Two corrections made while wiring, worth not rediscovering:**
+- The user-annotations **SQL guard** (allowlist of verbs/tables, ATTACH and friends forbidden)
+  existed only in the Service. It is the entire boundary between frontend-supplied SQL and
+  arbitrary SQLite, and the hosted bridge runs the same frontend SQL — so it moved INTO Core as
+  `UserAnnotations/UserAnnotationSqlGuard`, where both transports get it. Core now guards on
+  every `Query`/`Execute`.
+- `SeforimDbPathResolver.Resolve()` returns "not found" instead of a path known not to exist, so
+  `getSeforimDbPath` now answers `Path = ""` rather than a default probe path with `Exists=false`.
+  Verified against the frontend: both `SettingsPageAdvancedSection.vue` and `SetupWizardStepDb.vue`
+  only display the value, and the setup wizard is what handles "no database" — so an empty field
+  is correct, not a lost hint.
 
 > ## ⚠ THE SERVICE SHIPS AS NATIVE AOT — HOLD THIS THROUGH EVERY SLICE
 > `KitveiHakodeshService` sets `PublishAot=true` and references Core, so **everything in
@@ -514,7 +667,7 @@ Service wins and Lib is adjusted — with the documented exceptions in section 7
    (`Catalog`, `DbChangeStamp`) in 6 and 7.
 
 0b. **ONE copy of every shipped database. No duplicates, anywhere, ever.**
-   A binary asset lives in exactly one place — `Core/Resources/` — and every consumer
+   A binary asset lives in exactly one place — its owning project (Core: `Dictionary/`, `HebrewBooks/`) — and every consumer
    reaches it through Core. No "keep them identical" rule, no importer writing two files,
    no second copy under `public/`. If a consumer seems to need its own copy, that is a
    delivery problem to solve, not a copy to create. Today: `HebrewBooks.db` has **3**
@@ -734,7 +887,7 @@ Service wins and Lib is adjusted — with the documented exceptions in section 7
 | HebrewBooks catalog | `HebrewBooksDb` | Lib `HebrewBooksDb` + Service `HebrewBooksService` |
 | DB change detection | `DbFileFingerprint`, `DbChangeWatcher` | Service `Common/*` |
 | **Reusable toolkit** | see section 1 (`Common/`) | SQLite native loading, update checking, Office/Word COM, fonts, env probes, logging, shell registration |
-| **Bundled databases** | `Core/Resources/` | `Dictionary.db`, `HebrewBooksCatalog.db` |
+| **Bundled databases** | `Core/Dictionary/`, `Core/HebrewBooks/` | `Dictionary.db`, `HebrewBooksCatalog.db` |
 
 File search (`DocumentLocatorAdapter` in Lib, `DocumentLocatorService` in the Service) lands
 in **slice 9**, which also absorbs the `DocumentLocator` library itself into this repo and
@@ -929,13 +1082,13 @@ Line numbers and filenames below refer to the code **as it stands today**.
 | 4 | No busy timeout anywhere (only `HebrewBooksDb` `DefaultTimeout=5`). WAL allows 1 writer; a second writer (Zayit) gets `SQLITE_BUSY` immediately | med |
 | 5 | **`ReadOnly=true` is silently ignored by `Microsoft.Data.Sqlite`** — must become `Mode = SqliteOpenMode.ReadOnly`. Dropping it opens the user's corpus read-write, creating `-wal`/`-shm` sidecars and failing on read-only media | **high** |
 | 6 | Sync-over-async on the WinForms UI thread: `DocumentLocatorAdapter.cs:30`, `FileSystemSearchHandler.cs:62`, `FtsIndexState.cs:301` (also swallows) | med |
-| 7 | **`DbAccess._EnsureIndexes` writes `idx_link_type_target_line` into the user's corpus DB**; the Service never writes to it (all 5 readers are `Mode=ReadOnly`). Hosted and dev therefore run different schemas / query plans. Failure is swallowed into `Debug.WriteLine` | **high** |
+| ~~7~~ | **RESOLVED — `DbAccess` and `_EnsureIndexes` are gone.** Nothing writes to the user's corpus DB; a repo-wide grep for `idx_link_type_target_line` and `_EnsureIndexes` returns zero hits. Originally: it wrote that index into the user's corpus DB; the Service never writes to it (all 5 readers are `Mode=ReadOnly`). Hosted and dev therefore run different schemas / query plans. Failure is swallowed into `Debug.WriteLine` | **high** |
 | 8 | **Connection architecture divergence**: Lib holds 8 persistent round-robin connections with `PRAGMA cache_size=-8192` (64 MB total) + `mmap_size=256 MB`; the Service opens fresh per call. Naive unification risks a hosted perf regression | **high** |
 | 9 | `Encoding.GetEncoding(1255)` throws on net10 without a provider. Lib **decodes** cp1255; the Service only emits a charset **label**. Precedent: `PathIndex.cs:721` uses `CodePagesEncodingProvider.Instance.GetEncoding(1255)`. Prefer: Core returns bytes + label, never decodes | med |
 | 10 | ~~`Dictionary.db` copies have DRIFTED~~ — **RETRACTED, verified false.** The two files are row-for-row identical (`word` 55,859 / `sense` 39,499 / `link` 54,606 / `link_kind` 5 / `source_kind` 9; per-table data hashes match). Same page_count 2312, page_size 4096, freelist 0. The differing md5 is **physical only** (page ordering, `sqlite_stat1`, WAL state). **Lesson: md5 is the wrong equality test for a SQLite file — compare through the tables.** The real finding is gotcha 14 | — |
 | 14 | **`vue-frontend/public/dictionary/KitveiHakodesh_dictionary.db` (9.5 MB) has NO reader.** `dictionaryDb.ts` states it plainly: hosted runs SQL via the C# dict-sql bridge, dev routes through the service. No `fetch`, no sql.js, no wasm anywhere in `src/` touches it — yet vite copies it into `dist/` on every build and it ships. Delete it | **high** |
 | 11 | Resource path resolution: Lib uses `AppDomain.CurrentDomain.BaseDirectory`, Service uses `AppContext.BaseDirectory`. Under VSTO, `Assembly.GetExecutingAssembly().Location` points at the shadow-copy dir where no `.db` was copied. **Inject the resource directory** | **high** |
-| 12 | Lucene version split: Service **beta00018**, DocumentLocator **beta00016**, `packages/` has only **beta00016**. Two betas over one index directory risks format incompatibility. Pin one | **high** |
+| ~~12~~ | **RESOLVED — pinned.** Core, the Service and the hosted library are all on **beta00018**; `packages/` now carries both betas. DocumentLocator stays on 00016 and owns a SEPARATE index directory, so the format skew this warned about cannot arise | ~~high~~ |
 | 13 | **TWO cross-process build locks guard the same index directory, using different primitives**: FtsLib `IndexWriteLock` takes an **OS file lock** on `write.lock`; Lib `FtsIndexState` takes a **named Mutex** (`FtsIndexBuildLock`). A process holding one cannot see a process holding the other, so neither is authoritative. Consolidate on `IndexWriteLock` in slice 4b | **high** |
 
 ### Duplicate pairs confirmed
@@ -945,7 +1098,7 @@ independently), `IsValidUtf8`, the `?` placeholder rewriter, the niqqud normaliz
 `ZayitDb` vs `DbAccess` vs `SeforimDbService` (three corpus readers), the cross-process build
 lock (two primitives), `HebrewBooks.db` (**3** byte-identical copies, one an orphan in no
 csproj), `Dictionary.db` (**2** copies, verified identical, one with no reader).
-All resolved by rule 0b: one copy, in `Core/Resources/`.
+All resolved by rule 0b: one copy, in Core (`Core/Dictionary/`, `Core/HebrewBooks/`).
 
 ### Do NOT unify
 
@@ -1061,7 +1214,7 @@ Pure backend merge, **zero frontend change** (raw SQL stays by design).
 
 ### Slice 2 — Dictionary
 - Service `DictionaryService` → `Core/Dictionary/DictionaryDbQueries` (9 typed methods);
-  `Dictionary.db` → `Core/Resources/`
+  `Dictionary.db` → `Core/Dictionary/`
 - Gather its 8 SQL statements as `const`s at the top of the queries file — 3 already are;
   no separate SQL file (rule 9). Fold in
   `dictionaryDb.sql.ts`
@@ -1077,7 +1230,7 @@ Pure backend merge, **zero frontend change** (raw SQL stays by design).
 
 ### Slice 3 — HebrewBooks
 - Lib `HebrewBooksDb` + Service `HebrewBooksService` → `Core/HebrewBooks/HebrewBooksCatalogDbQueries`;
-  the DB → `Core/Resources/HebrewBooksCatalog.db`
+  the DB → `Core/HebrewBooks/HebrewBooksCatalog.db`
 - SQL stays inline as a `const` — 1 statement, built dynamically (rule 9 threshold)
 
 - **RESTORE the catalog updater** as `HebrewBooksCatalogUpdater`. Recovered from
@@ -1522,6 +1675,30 @@ One pass over the 12 drifted pairs, on Service's names:
 **`getWordSynonyms` is NOT `dictSynonyms`** — Word COM thesaurus vs dictionary DB, two
 different features. Nav labels key `SINGLETON_ROUTES`; renames need lockstep updates.
 
+### Slice 9 — DocumentLocator — ⚠ THE PREMISE BELOW IS WRONG (checked 2026-10-07)
+
+**Do not "delete the pipe architecture". It is load-bearing.**
+
+`DocumentLocator/README.md` states why: only **Local System** can open raw NTFS volumes via
+`FSCTL_ENUM_USN_DATA`, so the index is built by a Windows service, and the named pipe exists
+precisely *"so your app never needs elevation"*. The hosted net48 app is a per-user install that
+must never elevate (see the per-user-install rule) — so its pipe path is the ONLY path open to
+it. Removing it would mean either elevating the app or losing live USN updates.
+
+The service's in-process `PathIndex` is not the same thing done twice: it is **dev-only** (not in
+the installer payload; vite spawns it from `bin`), and `DocumentLocatorService` already documents
+that, including the fact that `DefaultIndexPath` resolves per-process so the two hosts
+deliberately do NOT share a directory today.
+
+What is genuinely shared already is: `DocumentLocator` itself multi-targets `net48;net10.0-windows`
+and both hosts reference it, and the excluded-folder list goes through the library's own
+`ExcludedFoldersPersistence` — one implementation, one `excluded_folders.json` format.
+
+So: nothing to unify here. If the service ever ships to users, the one thing to fix is the index
+path, and Core's `AppFileLocator` is the piece for it.
+
+--- the original (incorrect) plan text, kept so the reasoning above is not re-litigated ---
+
 ### Slice 9 — DocumentLocator: absorb the library, delete the pipe architecture
 
 The "two different architectures" problem disappears rather than being reconciled — **there
@@ -1574,8 +1751,8 @@ exists after this.
 
 | # | Decision | Notes |
 |---|---|---|
-| 1 | **Lucene version** | 00018 (Service) vs 00016 (only one in `packages/`, proven on net48 via DocumentLocator). NuGet already unifies to 00018 in the Service process. **Blocks slice 6** |
-| 2 | **`idx_link_type_target_line`** | Keep creating it (dev starts writing to the corpus) or drop it (hosted may regress)? **Blocks slice 4** |
+| ~~1~~ | ~~**Lucene version**~~ | **SETTLED.** Verified per project: Core, Service and hosted library all reference beta00018; only DocumentLocator is on 00016 and its index directory is its own. Nothing is blocked |
+| ~~2~~ | ~~**`idx_link_type_target_line`**~~ | **SETTLED by deletion.** Zero hits repo-wide for the index name or `_EnsureIndexes`; gotcha 7 is closed with it |
 | 3 | **Connection model** | Adopt Lib's explicit 8-connection pool + pragmas, or fresh-per-call relying on `Microsoft.Data.Sqlite` pooling? **Blocks slice 4** |
 | ~~4~~ | ~~Authoritative `Dictionary.db`~~ | **VOID** — there was no drift (gotcha 10 retracted) and the frontend copy has no reader (gotcha 14). Nothing to choose: keep Core's, delete the other. No longer blocks slice 2 |
 | 5 | **`ShellRegistration`** | Borderline — reusable mechanism, but it mutates machine state outside the app's own files |
@@ -1639,14 +1816,153 @@ have to be reviewed for correctness. Each item is verified dead, not merely susp
 |---|---|
 | `KitveiHakodeshLib/HebrewBooks.db` | **tracked** but declared in no csproj; byte-identical (`4e417017…`) to the two live copies |
 | `vue-frontend/public/dictionary/KitveiHakodesh_dictionary.db` (9.5 MB) | **no reader anywhere** — both transports go through C# (`dictionaryDb.ts` says so). Copied into `dist/` on every build |
-| `catalog_abbreviations.csv` + `csv_to_json.py` | CSV last touched 2026-07-22 while the json/`.g.cs` moved together 2026-08-13 — out of the flow for weeks |
-| `catalog_abbreviations.json` + `gen_catalog_abbreviations.py` + `CheckCatalogAbbreviationsFresh` | verified 1:1 with the generated C# (275 = 275). **Port the two invariants to unit tests first** — no quote glyph in a key, no colliding keys |
-| `wikidictionary.db` | referenced in exactly ONE line; the file exists nowhere in the repo, so `_wikiDb` is always null and `QueryWiki` always no-ops. **Decide: finish it or delete it** |
+| ~~`catalog_abbreviations.csv` + `csv_to_json.py`~~ | **DONE — deleted.** Nothing referenced them in any csproj or source; the `.json` they fed was already gone |
+| ~~`catalog_abbreviations.json` + `gen_catalog_abbreviations.py` + `CheckCatalogAbbreviationsFresh`~~ | **DONE — deleted, invariants ported first.** `SeforimDbCatalogAbbreviationsCheck.Verify()` holds both (no quote glyph in a key; no colliding keys) and `KitveiHakodeshService.Tests` runs it before every mode — it needs no database, so it always runs. Proven by injecting one fault of each kind: both were caught (exit 3), then reverted |
+| ~~`wikidictionary.db`~~ | **DONE — gone.** Zero hits for `wikidictionary`, `_wikiDb` or `QueryWiki` across the backend and the frontend |
 | Lib's `Dapper` / `Dapper.SqlBuilder` references | unused once Core is raw ADO (rule 0d). Note `Dapper.SqlBuilder`'s HintPath points three levels up, unlike every sibling — it would break on a fresh clone |
 | `NET10_SPLIT_AND_OPTIMIZATION.md` | 7 references to the now-deleted `SearchParallel` |
+| **Core types with no caller** (verified 2026-10-10, repo-wide) | Five, and they are NOT all the same case — each needs a decision, not a sweep: **`HebrewBooksCatalogUpdater`** (346 lines) and **`TextEncodingDetector`** (164) each JUSTIFY a PackageReference both legs ship (HtmlAgilityPack and System.Text.Encoding.CodePages respectively, by name, in `KitveiHakodesh.Core.csproj`) — so deleting either should drop its package too, and the catalog updater looks like a feature that was written and never wired rather than something dead. **`FileLogger`** and **`ShellRegistration`** are the Core halves of pairs whose hosted copies were just deleted; they are ready to use and cost nothing to keep. **`NetFrameworkPolyfills`** (116) is net48 support code that nothing currently needs |
 
 **Not here — these belong to their slices**, because leaving them would mean the same logic
 exists twice: the old `UserSettingsDbAccess` / `DbAccess` / `HebrewBooksDb` / `DictionaryService`
 copies, `FtsLib/SeforimDb/*`, the `__webviewQuery` / `__webviewDictQuery` bridge actions, and
 the Mutex-based build lock.
 
+
+---
+
+# Leg 2 - Service-only data access (started 2026-10-11)
+
+**Goal (the whole point):** after this leg, `KitveiHakodeshService` is the ONLY csproj that
+references SQLite, Lucene, FtsLib - or `KitveiHakodesh.Core`. `KitveiHakodeshLib`,
+`KitveiHakodeshDemoApp`, `KleiKodeshVsto` and `UpdateCheckerLib` reach data through the
+service's named pipe. The dev web app is untouched (it keeps the loopback HTTP host).
+
+**Decided with the user:**
+- The service is a HARD runtime dependency. No fallback for now.
+- Hosted = pipe. Only dev uses the loopback HTTP host.
+- Keep the door open for a fallback: callers go through `IKitveiHakodeshServiceChannel`
+  (KitveiHakodesh.ServiceClient). A future in-process answerer is a second implementation.
+- DocumentLocator and its own pipe are NOT part of this leg (they are the leg after).
+
+**Shape:**
+- `KitveiHakodesh.ServiceClient` (net48, SDK-style): pipe connect, frame protocol, the channel
+  interface. Carries opaque bytes - no MessagePack, no DTOs, no Core.
+- `KitveiHakodeshLib/Bridge/ServiceRpcRelay.cs`: WebResourceRequested handler for the virtual
+  host `http://kitvei-service`. `POST /rpc` -> one pipe round-trip; `POST /rpc-stream` -> the
+  pipe stream IS the response body (same `[len][frame]` chunks as the HTTP route). CORS
+  preflight answered locally. 503 when the pipe is unreachable (serviceClient.ts retries 503).
+- `vue-frontend/src/webview-host/serviceClient.ts` is now the one client for both runtimes:
+  hosted base URL = `http://kitvei-service`, no token.
+
+**Slice 1 - DONE 2026-10-11:** seforim ops + dictionary ops + catalog TOC-title fetch go
+through the relay. Deleted: `Db/SeforimQueryHandler.cs`, `Dictionary/DictionaryQueryHandler.cs`,
+the `seforimQuery`/`dictQuery` bridge actions, `__webviewQuery`/`__webviewDictQuery`,
+`hostedBridgeContract.test.ts`, `queries.sql.ts`, `seforimDb.query()`. Lib, Demo and the
+frontend build. NOT yet verified live (the streaming relay path in particular).
+
+**Remaining slices (each: frontend callers -> serviceCall, delete the Lib handler, then drop
+the Core types it used):**
+1. Catalog TOC search (`catalogTocSearch/Status/ResetIndex`) - Lib `Catalog/*` goes, and with
+   it Lucene + J2N + M.E.Configuration/Primitives from Lib's packages.config.
+2. Full-text search - `ftsSearchStream` + `ftsIndexProgressStream` replace the
+   `FtsSearchStart/Cancel` + `searchBatch` push events; Lib `Search/*` goes. Service gaps to
+   decide: skip offset, delete-index-without-rebuild, eta/segment progress fields, the
+   `ftsDbNotFound` / `ftsIndexInvalidated` pushes.
+3. User settings - `userSettingsQuery/Execute` (JSON-in-msgpack shape); Lib `UserSettings/*`
+   goes. Gap: the user_settings.db copy-on-DB-switch prompt has no service op.
+4. HebrewBooks - `hbSearch` + download ops; Lib `HebrewBooksDb` + the Core downloader go.
+   Gap: the service answers with an HTTP `/file` handle, hosted needs a path (or the relay
+   learns to serve `/file/*` by asking the service). Cache dirs differ.
+5. Seforim DB path (`get/set/pick/clearSeforimDbPath`) - the service restarts itself on
+   change; Lib `DbHandler` shrinks to what is UI (reset settings, title-bar theme). Gap:
+   CanOpen validation (service checks File.Exists only).
+6. `AppSettings` - Lib gets its own registry accessors for UI-only values (dark mode, colours,
+   window bounds); the data-adjacent ones (db path, hb folder, turn-off-updates) go to the
+   service ops. Then the `KitveiHakodesh.Core` reference leaves Lib's csproj.
+7. `UpdateCheckerLib` - inline the three Core.Updates helpers; drop its Core reference.
+8. VSTO leftovers: `SQLite.Interop.dll` copy items + `PreLoadSQLite_BaseDirectory`.
+9. Core goes net10-only (no net48 leg left to serve); `Catalog/NetFxCompat.cs` dies with Lib's
+   Catalog folder.
+10. Lifecycle: who starts the service for the hosted app (installed Windows service vs spawn)
+    - open; today Lib connects to the default pipe name (env `KHS_PIPE_NAME` overrides).
+
+Stays in Lib for good (host-process work, no data): window/popout/fullscreen, theme + tab
+mirror, clipboard, local-file hosting + Word->PDF via the live Word, paste/export via the live
+Word, Word thesaurus, diagnostics, HebrewBooks save-as/reveal, native pickers.
+
+### Leg 2 status - 2026-10-11, end of day
+
+DONE (commits 953e037d, e1e30b36, f4d5b6ea): slices 1-8. KitveiHakodeshLib, KitveiHakodeshDemoApp
+and UpdateCheckerLib reference no Core, SQLite, Lucene, FtsLib or MessagePack. Core is
+net10.0-windows only. The hosted page uses serviceClient.ts for every data op; streaming ops
+are pushed to the page as serviceStreamFrame / serviceStreamEnd events by ServiceRpcRelay.
+Lifecycle (slice 10): KitveiHakodeshServiceLauncher spawns KitveiHakodeshService.exe (owner-bound)
+when nothing listens on the pipe; the installer does not deploy the service yet.
+
+NOT verified live. The relay (one-shot and streaming), the launcher and the hosted DB-path flow
+have only been built, not run inside WebView2.
+
+Left for the user to decide (VSTO startup is off-limits without an OK): KleiKodeshVsto.csproj still
+references Dapper, Dapper.SqlBuilder and System.Data.SQLite and copies SQLite.Interop.dll;
+ThisAddIn.cs still sets PreLoadSQLite_BaseDirectory. Nothing uses them any more.
+
+Next leg: DocumentLocator (its own pipe + DocumentLocator.Client in Lib).
+
+# Leg 3 - one service: KitveiHakodeshSvc replaces DocumentLocatorSvc (2026-10-11)
+
+**Decided with the user:** no second service. KitveiHakodeshService is the installed Windows
+service and owns the NTFS file index (DocumentLocator library in-process, as dev always did).
+The x64 native-AOT service ships in EVERY installer variant (32-bit Office on 64-bit Windows runs
+it as a separate process; 32-bit Windows is not supported).
+
+**The session-0 problem and its answer.** A Windows service runs as SYSTEM: its HKCU is not the
+user's, its AppData has no library, it has no desktop. So:
+- `KitveiHakodesh.Core.Settings.UserProfile` is the one place Core asks "whose registry hive /
+  AppData"; AppSettingsRegistry, SeforimDbPathResolver, RegistryValueWatcher and AppFileLocator
+  go through it. Default = the process user.
+- In service mode (`Hosting/UserSessionBinding`) the service starts with ONLY a pipe listener;
+  the first client to connect is impersonated (`RunAsClient`), its token binds UserProfile
+  (RegOpenCurrentUser + SHGetKnownFolderPath), the connection is closed unanswered (the client
+  retries), and only then is the data host built. One user per service lifetime; the data host
+  restarting itself (DB path change) stops the service, and the next host starts it again.
+- Desktop-only ops (pickers, Word export/paste, open-in-default-app) are refused in service mode
+  (`WindowsServiceMode.IsDesktopOnlyOp`); the hosts do those themselves. Dev still spawns its own
+  console instance, so nothing changes there.
+- Pipes are created with an ACL (AuthenticatedUsers RW) so a user process can reach a SYSTEM pipe.
+
+**Registration:** `KitveiHakodeshService.exe --install | --uninstall` (`Hosting/ServiceRegistration`,
+ported from DocumentLocator.Service): LocalSystem, demand start, SERVICE_START granted to
+authenticated users. The hosts start it through the SCM (`KitveiHakodeshServiceLauncher`,
+ServiceController) and only spawn the exe when nothing is registered (dev / portable).
+
+**Installer:** `KitveiHakodeshServiceHelper` replaces `DocumentLocatorHelper` (shutdown op and
+reindex op over the pipe, hand-built MessagePack `{Op}` envelope; `--install` under runas = the
+one UAC prompt, normally a no-op on update). `LegacyServiceRetirement` now retires
+DocumentLocatorSvc. The package build publishes the service (native AOT, win-x64; vswhere must be
+on PATH) into `KitveiHakodeshService\` under the install root; its indexes/caches there are
+preserved on update. NSIS uninstall stops+deletes KitveiHakodeshSvc (and still the legacy one).
+
+**Lib / frontend:** file search, warm-up, index status, reset and the excluded-folders list all go
+through the pipe (`locateDocuments` etc.); `FileSystemSearch/*`, `DocumentLocator.Client` and the
+WinForms excluded-folders manager are gone; the Vue dialog serves both runtimes.
+
+**Not done / to watch:** no live run yet of the installed service path (binding, ACL, SCM start).
+`DocumentLocator.Service`, `DocumentLocator.Client` and their tests still exist in the repo but
+nothing ships or references them from the product; delete when convenient. The service's
+HttpHostServer is off in service mode. Index location is now the service's folder under the
+install root (was the install root for DocumentLocatorSvc) - the old `filesystemindex` is not
+migrated; the first run rebuilds.
+
+### Leg 3 follow-up - DocumentLocator folded into Core (2026-10-11)
+
+The DocumentLocator submodule (library, Service, Client, Demo, Tests) is removed from this
+repo; its GitHub repo is untouched and was clean and fully pushed at removal. The index logic
+lives in `KitveiHakodesh.Core/LocalFiles/`: `LocalFileIndex` (was PathIndex),
+`LocalFileIndexMftCrawler`, `LocalFileIndexUsnJournal`, `LocalFileIndexDirectoryCrawler` (was
+FallbackCrawler), `LocalFileIndexExcludedFolders`. The service wrapper is
+`KitveiHakodeshService/LocalFiles/LocalFileIndexService` (was DocumentLocatorService). Now on
+Core's Lucene (beta00018, was 00016); the index is rebuilt on first run anyway (new location).
+The moved files are `#nullable disable` (never annotated); `Marshal.SizeOf/PtrToStructure` use the
+generic AOT-safe overloads. The RPC op names (`locateDocuments`, `resetDocumentLocatorIndex`, ...)
+are unchanged: they are the wire contract.

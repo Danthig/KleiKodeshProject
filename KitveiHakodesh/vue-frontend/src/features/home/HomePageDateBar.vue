@@ -2,15 +2,18 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { useNow, useWindowSize } from '@vueuse/core'
 import { useDropdownClose } from '@/composables/useDropdownClose'
+import { useListKeys } from '@/composables/useListKeyNav'
+import { wantsNewTab } from '@/composables/useOpenInNewTab'
 import { usePaneNavigation } from '@/composables/usePaneNavigation'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { dbReady } from '@/webview-host/seforimDb'
 import { storeToRefs } from 'pinia'
 import NextZmanPopup from './NextZmanPopup.vue'
 import { useNextZman } from './useNextZman'
 import { useHomeDateBarFit } from './useHomeDateBarFit'
+import { computeBarPopupAnchor, type BarPopupAnchor } from './homeBarPopupAnchor'
+import HomeWorldClockDropdown from './HomeWorldClockDropdown.vue'
 import { dateInfo, loadDateInfo } from './homeDateInfo'
-import { navigateToDafYomi } from './dafYomiNavigation'
+import { useHomeDailyLearningEntries, type HomeDailyLearningEntry } from './useHomeDailyLearning'
 
 const paneNavigation = usePaneNavigation()
 const { showClock } = storeToRefs(useSettingsStore())
@@ -63,6 +66,10 @@ const nextZmanCountdown = computed(() => {
   return `בעוד ${hoursText} ו-${minutes} דקות`
 })
 
+const dailyLearningEntries = useHomeDailyLearningEntries()
+// Keyboard nav walks only the rows that can open (their book is in the library).
+const navigableLearningEntries = computed(() => dailyLearningEntries.value.filter((entry) => entry.open))
+
 const dateBarRef = ref<HTMLElement | null>(null)
 const hasNextZman = computed(() => !!nextZman.value)
 const { showClockInBar, showZmanInBar, remeasure } = useHomeDateBarFit(
@@ -71,8 +78,8 @@ const { showClockInBar, showZmanInBar, remeasure } = useHomeDateBarFit(
   hasNextZman,
 )
 
-// Re-measure when the content itself changes (zman appears, daf loads, etc.).
-watch([showBarClock, nextZman, () => dateInfo.value.dafYomi, clockTime], remeasure)
+// Re-measure when the content itself changes (zman appears, learning loads, etc.).
+watch([showBarClock, nextZman, () => dailyLearningEntries.value.length, clockTime], remeasure)
 
 // ── Zmanim popup ──────────────────────────────────────────────────────────────
 
@@ -84,9 +91,6 @@ const zmanPopupEl = computed<HTMLElement | null>(
   () => (zmanPopupRef.value?.$el as HTMLElement) ?? null,
 )
 
-// Fixed-position anchor: centered over the trigger, then clamped so it never
-// escapes the viewport, and pinned just above the bottom bar.
-const ZMAN_POPUP_MARGIN = 8
 const zmanPopupLeft = ref(0)
 const zmanPopupBottom = ref(0)
 const zmanPopupMaxHeight = ref(0)
@@ -99,18 +103,11 @@ const zmanPopupStyle = computed(() => ({
 function computeZmanPopupAnchor() {
   const button = zmanButtonRef.value
   if (!button) return
-  const rect = button.getBoundingClientRect()
   // Best-effort width (falls back to the popup's min-width before it mounts).
-  const width = zmanPopupEl.value?.offsetWidth || 220
-  const center = rect.left + rect.width / 2
-  let left = center - width / 2
-  const maxLeft = window.innerWidth - width - ZMAN_POPUP_MARGIN
-  left = Math.min(Math.max(left, ZMAN_POPUP_MARGIN), Math.max(ZMAN_POPUP_MARGIN, maxLeft))
-  zmanPopupLeft.value = left
-  zmanPopupBottom.value = window.innerHeight - rect.top + ZMAN_POPUP_MARGIN
-  // The popup opens upward from just above the bar; cap its height to the space
-  // between the top margin and the bar so it never overflows the top.
-  zmanPopupMaxHeight.value = Math.max(120, rect.top - ZMAN_POPUP_MARGIN * 2)
+  const anchor = computeBarPopupAnchor(button, zmanPopupEl.value?.offsetWidth || 220)
+  zmanPopupLeft.value = anchor.left
+  zmanPopupBottom.value = anchor.bottom
+  zmanPopupMaxHeight.value = anchor.maxHeight
 }
 
 const zmanCloser = useDropdownClose(
@@ -136,19 +133,75 @@ function openHebrewCalendar() {
   paneNavigation.navigateToDestination('/hebrew-calendar')
 }
 
-function openDafYomi() {
-  // The button only renders when dafYomi is set, but narrow explicitly rather
-  // than relying on the template guard.
-  const dafYomi = dateInfo.value.dafYomi
-  if (!dafYomi) return
-  navigateToDafYomi(dafYomi, paneNavigation)
+// ── Daily learning dropdown ───────────────────────────────────────────────────
+
+const isLearningOpen = ref(false)
+const learningBarItemRef = ref<HTMLElement | null>(null)
+const learningButtonRef = ref<HTMLElement | null>(null)
+const learningMenuRef = ref<HTMLElement | null>(null)
+const learningMenuAnchor = ref<BarPopupAnchor>({ left: 0, bottom: 0, maxHeight: 0 })
+const learningMenuStyle = computed(() => ({
+  left: `${learningMenuAnchor.value.left}px`,
+  bottom: `${learningMenuAnchor.value.bottom}px`,
+  maxHeight: `${learningMenuAnchor.value.maxHeight}px`,
+}))
+
+function computeLearningMenuAnchor() {
+  const button = learningButtonRef.value
+  if (!button) return
+  learningMenuAnchor.value = computeBarPopupAnchor(button, learningMenuRef.value?.offsetWidth || 220)
+}
+
+const learningCloser = useDropdownClose(
+  learningBarItemRef,
+  () => {
+    isLearningOpen.value = false
+  },
+  { ignore: [learningMenuRef] },
+)
+
+function toggleLearningMenu() {
+  if (learningCloser.justClosed.value) return
+  const opening = !isLearningOpen.value
+  isLearningOpen.value = opening
+  if (opening) {
+    learningFocusedIndex.value = 0
+    computeLearningMenuAnchor()
+    nextTick(() => {
+      computeLearningMenuAnchor()
+      learningMenuRef.value?.focus()
+    })
+  }
+}
+
+function openLearningItem(entry: HomeDailyLearningEntry, openInNewTab: boolean) {
+  if (!entry.open) return
+  isLearningOpen.value = false
+  entry.open(openInNewTab)
+}
+
+// Arrow/Home/End/Enter (Ctrl+Enter = new tab) via the shared list-keys helper.
+const { focusedIndex: learningFocusedIndex } = useListKeys(
+  learningMenuRef,
+  () => navigableLearningEntries.value.length,
+  (index, openInNewTab) => {
+    const entry = navigableLearningEntries.value[index]
+    if (entry) openLearningItem(entry, openInNewTab)
+  },
+)
+
+function onLearningMenuKeydown(event: KeyboardEvent) {
+  if (event.code !== 'Escape') return
+  event.preventDefault()
+  isLearningOpen.value = false
+  learningButtonRef.value?.focus()
 }
 </script>
 
 <template>
   <div ref="dateBarRef" class="date-bar">
     <template v-if="showClockInBar">
-      <span class="bar-item bar-clock">{{ clockTime }}</span>
+      <HomeWorldClockDropdown :clock-time="clockTime" />
       <span class="bar-sep">·</span>
     </template>
     <template v-if="nextZman && showZmanInBar">
@@ -176,14 +229,48 @@ function openDafYomi() {
     <button class="bar-item bar-item--btn" @click="openHebrewCalendar">
       {{ dateInfo.hebrewDate }}
     </button>
-    <template v-if="dateInfo.dafYomi">
+    <template v-if="dailyLearningEntries.length">
       <span class="bar-sep">·</span>
-      <button v-if="dbReady" class="bar-item bar-item--btn" @click="openDafYomi">
-        <span class="bar-lbl">דף יומי:</span> {{ dateInfo.dafYomi }}
-      </button>
-      <span v-else class="bar-item"
-        ><span class="bar-lbl">דף יומי:</span> {{ dateInfo.dafYomi }}</span
-      >
+      <div ref="learningBarItemRef" class="learning-wrap">
+        <button
+          ref="learningButtonRef"
+          class="bar-item bar-item--btn learning-btn"
+          :class="{ on: isLearningOpen }"
+          @click="toggleLearningMenu"
+        >
+          לימוד יומי
+        </button>
+      </div>
+      <Teleport to="body">
+        <div
+          v-if="isLearningOpen"
+          ref="learningMenuRef"
+          class="learning-menu"
+          :style="learningMenuStyle"
+          dir="rtl"
+          tabindex="-1"
+          @keydown="onLearningMenuKeydown"
+        >
+          <button
+            v-for="entry in dailyLearningEntries"
+            :key="entry.key"
+            class="learning-menu-item"
+            :class="{
+              focused:
+                !!entry.open && navigableLearningEntries.indexOf(entry) === learningFocusedIndex,
+            }"
+            :disabled="!entry.open"
+            :data-nav-item="entry.open ? '' : undefined"
+            :title="entry.open ? undefined : 'הספר אינו בספרייה'"
+            tabindex="-1"
+            @click="openLearningItem(entry, wantsNewTab($event))"
+            @mouseenter="entry.open && (learningFocusedIndex = navigableLearningEntries.indexOf(entry))"
+          >
+            <span class="learning-menu-label">{{ entry.label }}</span>
+            <span class="learning-menu-path">{{ entry.location }}</span>
+          </button>
+        </div>
+      </Teleport>
     </template>
   </div>
 </template>
@@ -216,10 +303,6 @@ function openDafYomi() {
 .bar-lbl {
   font-weight: 600;
   color: var(--text-primary);
-}
-.bar-clock {
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.03em;
 }
 .bar-item--btn {
   background: none;
@@ -278,6 +361,61 @@ function openDafYomi() {
 }
 .zman.on {
   color: var(--accent-color);
+}
+.learning-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.learning-btn.on {
+  color: var(--accent-color);
+}
+/* Density matches NextZmanPopup (12px rows, 1.4 line-height, 2px row padding). */
+.learning-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 220px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+.learning-menu-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 4px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: start;
+  cursor: pointer;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.learning-menu-item:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.learning-menu-item:not(:disabled):hover,
+.learning-menu-item.focused {
+  background: var(--hover-bg);
+}
+.learning-menu-label {
+  color: var(--text-secondary);
+}
+.learning-menu-path {
+  font-weight: 600;
 }
 .zman-popup-anchor {
   position: fixed;

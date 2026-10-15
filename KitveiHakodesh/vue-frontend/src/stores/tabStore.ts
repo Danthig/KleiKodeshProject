@@ -31,6 +31,8 @@ import {
   stepHistory,
   jumpHistory,
   dropHistory,
+  popCurrentAndGoBack,
+  clearHistory,
   canGoBack as historyCanGoBack,
   canGoForward as historyCanGoForward,
 } from './navHistory'
@@ -112,6 +114,9 @@ export interface Tab {
   // host's "חיפוש ספר בכתבי הקודש" context menu. BookCatalogPage reads this on mount
   // into its reactive searchQuery. Kept separate from searchQuery, which the FTS page owns.
   catalogQuery?: string
+  // Category id the book-catalog page (route '/books') opens at, stamped by a home
+  // folder card. One-shot: BookCatalogPage consumes and clears it. Transient.
+  catalogCategoryId?: number
   // Query for the local-file-search page (route '/file-search'), saved so the input
   // survives navigating away and back. Kept separate from searchQuery, which the FTS
   // page owns — sharing that field leaked an FTS query into the file-search input.
@@ -159,6 +164,25 @@ const IDENTITY_FIELDS = [
 ] as const satisfies readonly (keyof Tab)[]
 
 /**
+ * The tab fields that spell "show the home page". Every identity field is named
+ * explicitly as undefined rather than omitted: these go through a merge, and a
+ * merge keeps what a patch leaves out, so an omitted field would strand the
+ * outgoing document's identity on the tab.
+ */
+const HOME_PATCH = {
+  route: '/' as TabRoute,
+  title: 'בית',
+  bookId: undefined,
+  localFilePath: undefined,
+  localFileName: undefined,
+  localFileHbBookId: undefined,
+  localFileHbBookTitle: undefined,
+  isOtzariaAddin: undefined,
+  searchQuery: undefined,
+  tocPath: undefined,
+} satisfies Partial<Omit<Tab, 'id'>>
+
+/**
  * Cleared automatically whenever a patch changes identity. A patch that sets one of
  * these itself still wins — navigating to a specific line means supplying the line.
  */
@@ -184,6 +208,7 @@ const POSITION_FIELDS = [
 const TRANSIENT_FIELDS = [
   ...POSITION_FIELDS.filter((f) => f !== 'tocPath'),
   'navNonce',
+  'catalogCategoryId',
   'localFileVirtualUrl',
   'localFileConverting',
   'localFileLoadingType',
@@ -508,6 +533,23 @@ export const useTabStore = defineStore('tabs', () => {
     moveThroughHistory(tabId, () => jumpHistory(tabId, index))
   }
 
+  /**
+   * Points a tab at a location WITHOUT recording a frame — the one primitive behind
+   * every cursor move and every page close. Recording here would push the frame we
+   * just stepped off (or deleted) back onto the stack, which is the whole thing
+   * these callers exist to avoid.
+   */
+  function showLocationWithoutRecording(tab: Tab, location: NavLocation) {
+    const patch = tabPatchForLocation(location)
+    applyLocationPosition(patch, location)
+    Object.assign(tab, patch)
+  }
+
+  /** Sends a tab home without recording a frame — the "nothing left to show" fallback. */
+  function showHomeWithoutRecording(tab: Tab) {
+    Object.assign(tab, HOME_PATCH)
+  }
+
   function moveThroughHistory(tabId: string, move: () => NavLocation | null) {
     const tab = tabs.value.find((t) => t.id === tabId)
     if (!tab) return
@@ -516,11 +558,7 @@ export const useTabStore = defineStore('tabs', () => {
     const target = move()
     if (!target) return
 
-    const patch = tabPatchForLocation(target)
-    applyLocationPosition(patch, target)
-    // Assign directly rather than through applyTabPatch: this is a history MOVE,
-    // and recording it would push the frame we just stepped off onto the stack.
-    Object.assign(tab, patch)
+    showLocationWithoutRecording(tab, target)
   }
 
   /**
@@ -550,6 +588,60 @@ export const useTabStore = defineStore('tabs', () => {
   function forgetLocation(id: string) {
     recentLocations.value = recentLocations.value.filter((l) => l.id !== id)
   }
+
+  /**
+   * "Close current page" for environments without a native tab strip (VSTO, dev).
+   *
+   * Removes the current entry from the per-tab history stack and navigates back
+   * to the previous entry. Also removes the page from recentLocations so it
+   * disappears from the address-bar dropdown. If there is no previous entry
+   * (the reader is at the very beginning of their history), navigates home instead.
+   */
+  function closeCurrentPage(tabId: string) {
+    const tab = tabs.value.find((t) => t.id === tabId)
+    if (!tab) return
+
+    // Remove from recentLocations before moving — captureCurrentPosition would
+    // just update it, but we want it gone.
+    const docKey = locationKey(tab)
+    recentLocations.value = recentLocations.value.filter((l) => locationKey(l) !== docKey)
+
+    // Remove from the per-tab history stack and step back.
+    const target = popCurrentAndGoBack(tabId)
+    forgetClosedPageState(tab)
+    if (target) showLocationWithoutRecording(tab, target)
+    // No history to go back to — the reader is at the very beginning.
+    else showHomeWithoutRecording(tab)
+  }
+
+  /**
+   * Drops the position state that described the page being closed. The page is gone
+   * for good, so a pending jump or a search highlight belonging to it must not ride
+   * along onto whatever the tab shows next. This is hygiene, not the fix for the
+   * reopening book — that lives in popCurrentAndGoBack, which purges every frame for
+   * the closed document, not just the one under the cursor.
+   */
+  function forgetClosedPageState(tab: Tab) {
+    for (const field of POSITION_FIELDS) delete tab[field]
+  }
+
+  /**
+   * "Close all pages" (Ctrl+X) for environments without a native tab strip.
+   *
+   * Clears the entire per-tab history stack and all recentLocations, then
+   * navigates home.
+   */
+  function closeAllPages(tabId: string) {
+    const tab = tabs.value.find((t) => t.id === tabId)
+    if (!tab) return
+
+    clearHistory(tabId)
+    recentLocations.value = []
+
+    forgetClosedPageState(tab)
+    showHomeWithoutRecording(tab)
+  }
+
 
   /**
    * Everything a closing tab must give up. Its final position is folded into the
@@ -1162,12 +1254,11 @@ export const useTabStore = defineStore('tabs', () => {
     if (tab) applyTabPatch(tab, patch)
   }
 
+  // Home is not unique: every "new tab" gesture gets its own home tab, exactly as a
+  // browser opens a fresh new-tab page each time rather than switching to the one
+  // already open. Home holds no app-wide state, so copies cannot go stale.
   function openNewHomeTab() {
-    // Only consider tabs pane 1 can display (its own + adopted orphans) — never
-    // steal a home tab that lives in the open split pane.
-    const existing = pane1Tabs.value.find((t) => t.route === '/')
-    if (existing) switchTab(existing.id)
-    else openTab({ title: 'בית', route: '/' })
+    openTab({ title: 'בית', route: '/' })
   }
 
   // Destination pages (the tool routes listed in DESTINATION_ROUTES). Never
@@ -1259,6 +1350,8 @@ export const useTabStore = defineStore('tabs', () => {
     recentLocations,
     locationPatch,
     forgetLocation,
+    closeCurrentPage,
+    closeAllPages,
     canGoBack,
     canGoForward,
     goHistory,

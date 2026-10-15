@@ -2,43 +2,47 @@ namespace KitveiHakodeshService.Catalog;
 
 using KitveiHakodeshService.SeforimDb;
 
+// global:: because this project has its own KitveiHakodeshService.KitveiHakodesh namespace,
+// which would otherwise shadow the root one.
+using CatalogIndexCoordinator = global::KitveiHakodesh.Core.SeforimDbCatalog.SeforimDbCatalogIndexCoordinator;
+using CatalogIndexLogLevel = global::KitveiHakodesh.Core.SeforimDbCatalog.CatalogIndexLogLevel;
+
 /// <summary>
-/// Service wrapper around <see cref="CatalogTocIndex"/> — the disk-based Lucene index
-/// over full TOC paths behind the catalog search.
+/// Transport wrapper over <see cref="CatalogIndexCoordinator"/> — the catalog TOC-path index
+/// (Lucene). Core owns the index, its lifecycle, the search with latest-wins supersession and
+/// the status/result shapes. What stays here: DI lifetime, the log hookup, resolving the
+/// database once per process, and the CATALOG_TOC_INDEX_PATH override.
 ///
-/// Index location: "CatalogTocIndex" next to the service binary (AppContext.BaseDirectory),
-/// the same convention as the FTS index and the document-locator index.
-///
-/// Rebuilds: the ver file records the seforim-DB hash the committed index was built
-/// from. When the hash differs (DB updated/replaced/switched, or index format bumped),
-/// a rebuild starts on a background task and builds IN PLACE. Searches stay available
-/// throughout: a near-real-time reader serves partial results as documents are indexed,
-/// so results appear during the very first build too (see CatalogTocIndex.BuildAndSwitch).
+/// Index location: CATALOG_TOC_INDEX_PATH if set, else "CatalogTocIndex" next to the service
+/// binary (AppContext.BaseDirectory).
 /// </summary>
-public sealed class CatalogTocSearchService(ILogger<CatalogTocSearchService> logger)
+public sealed class CatalogTocSearchService
 {
-    private readonly string? _dbPath = SeforimDbLocator.Resolve();
-    private readonly string _indexPath = ResolveIndexPath();
+    private readonly ILogger<CatalogTocSearchService> _logger;
+    private readonly CatalogIndexCoordinator _coordinator;
 
-    private readonly object _lock = new();
-    private CatalogTocIndex? _index;
-    private Task? _buildTask;
-    private CancellationTokenSource? _buildCts;
+    public CatalogTocSearchService(ILogger<CatalogTocSearchService> logger)
+    {
+        _logger = logger;
 
-    private volatile bool _isReady;      // an index (fresh or stale) is open and serving
-    private volatile bool _isIndexing;
-    private volatile bool _buildStarted; // latch: build at most once per process
+        // Resolved ONCE, deliberately. The service treats the database as static per process —
+        // a switch made elsewhere restarts it (see DbChangeWatcher), so the fresh process
+        // re-resolves everything.
+        string? databasePath = SeforimDbLocator.Resolve();
 
-    // Failed build attempts. A failure re-arms the latch so the next Ensure retries, but
-    // only up to this many times — see the catch in RunBuild.
-    private const int MaxBuildAttempts = 3;
-    private int _failedBuilds;
-
-    // True while ResetIndexCore owns the wipe-and-rebuild. A failing build must NOT re-arm
-    // the build latch during that window — see the catch in RunBuild.
-    private bool _resetInFlight;
-    private volatile int _builtBooks;
-    private volatile int _totalBooks;
+        _coordinator = new CatalogIndexCoordinator(
+            resolveDatabasePath: () => databasePath,
+            indexPath: ResolveIndexPath(),
+            log: (level, message, ex) =>
+            {
+                switch (level)
+                {
+                    case CatalogIndexLogLevel.Error: logger.LogError(ex, "{Message}", message); break;
+                    case CatalogIndexLogLevel.Warning: logger.LogWarning(ex, "{Message}", message); break;
+                    default: logger.LogInformation("{Message}", message); break;
+                }
+            });
+    }
 
     private static string ResolveIndexPath()
     {
@@ -47,340 +51,38 @@ public sealed class CatalogTocSearchService(ILogger<CatalogTocSearchService> log
         return Path.Combine(AppContext.BaseDirectory, "CatalogTocIndex");
     }
 
-    private bool HasDb => !string.IsNullOrWhiteSpace(_dbPath) && File.Exists(_dbPath);
+    /// <summary>The Core coordinator, for the DB change watcher's rebuild policy.</summary>
+    public CatalogIndexCoordinator Coordinator => _coordinator;
 
     /// <summary>True while the background build runs — the idle memory trimmer must not
     /// fight it.</summary>
-    public bool IsBusy => _isIndexing;
+    public bool IsBusy => _coordinator.IsIndexing;
 
-    /// <summary>
-    /// Release the open Lucene reader/searcher so its retained memory is freed while the
-    /// service is idle — the catalog counterpart to dropping the SQLite pools. Called by
-    /// <see cref="Ipc.IdleMemoryTrimmer"/> during a trim. No-op (and safe) if no index is
-    /// open or a build is in flight; the next search reopens the reader lazily. Kept
-    /// cheap: it does not touch the index directory handle or trigger any rebuild.
-    /// </summary>
+    /// <summary>Release the idle Lucene reader during an idle memory trim (see Core).</summary>
     public void ReleaseIdleResources()
     {
-        if (_isIndexing) return; // build owns the reader; leave it (trimmer also gates on IsBusy)
         try
         {
-            if (_index is not null && _index.ReleaseIdleReader())
-                logger.LogDebug("catalog TOC index: released idle reader");
+            if (_coordinator.ReleaseIdleReader())
+                _logger.LogDebug("catalog TOC index: released idle reader");
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "catalog TOC index: idle reader release failed");
+            _logger.LogWarning(ex, "catalog TOC index: idle reader release failed");
         }
     }
 
-    private CatalogTocIndex GetIndex()
-    {
-        lock (_lock) { return _index ??= new CatalogTocIndex(_indexPath, _dbPath!); }
-    }
+    public void EnsureIndex() => _coordinator.EnsureIndex();
 
-    /// <summary>
-    /// Idempotent. Opens the existing index (even a stale one — no downtime) and, when
-    /// the stored DB hash differs from the current one, kicks off a background rebuild
-    /// that builds IN PLACE and stays searchable via a near-real-time reader. Called at
-    /// startup by <see cref="CatalogTocIndexingStarter"/> and lazily from search/status.
-    /// </summary>
-    public void EnsureIndex()
-    {
-        if (!HasDb || _buildStarted && _isReady) return;
-        lock (_lock)
-        {
-            if (_buildStarted) return;
+    public bool RebuildIfDbChanged() => _coordinator.RebuildIfDbChanged();
 
-            string currentHash;
-            try { currentHash = CatalogTocIndex.ComputeDbHash(_dbPath!); }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "catalog TOC index: could not hash seforim DB");
-                return;
-            }
+    public void ResetIndex() => _coordinator.ResetIndex();
 
-            var index = GetIndex();
-            bool opened = index.TryOpenActive();
-            if (opened) _isReady = true; // stale or fresh — either way, keep serving
+    public void Shutdown() => _coordinator.Shutdown();
 
-            if (opened && string.Equals(index.ActiveHash, currentHash, StringComparison.OrdinalIgnoreCase))
-            {
-                _buildStarted = true; // up to date — nothing to build
-                return;
-            }
+    public CatalogTocStatus Status() => _coordinator.Status();
 
-            logger.LogInformation(
-                opened
-                    ? "catalog TOC index is stale (seforim DB changed) — rebuilding in the background, serving the old index meanwhile"
-                    : "catalog TOC index missing — building");
-
-            _buildStarted = true;
-            _isIndexing = true;
-            _buildCts = new CancellationTokenSource();
-            var token = _buildCts.Token;
-            _buildTask = Task.Run(() => RunBuild(currentHash, token), CancellationToken.None);
-        }
-    }
-
-    private void RunBuild(string dbHash, CancellationToken ct)
-    {
-        try
-        {
-            Directory.CreateDirectory(_indexPath);
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            int docs = GetIndex().BuildAndSwitch(
-                dbHash,
-                onProgress: (done, total) => { _builtBooks = done; _totalBooks = total; },
-                ct: ct);
-            _isReady = true;
-            logger.LogInformation(
-                "catalog TOC index build complete — {Docs} docs in {Elapsed:F1}s (switched atomically)",
-                docs, sw.Elapsed.TotalSeconds);
-        }
-        catch (OperationCanceledException)
-        {
-            logger.LogInformation("catalog TOC index build cancelled");
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "catalog TOC index build failed");
-            // Re-arm so a later EnsureIndex retries. _buildStarted is set BEFORE the build
-            // and was never cleared on failure, so one transient error (the seforim DB locked
-            // by the FTS rebuild, a full disk) left EnsureIndex a permanent no-op and catalog
-            // search dead for the rest of the process. Bounded, so a build that always fails
-            // cannot be restarted by every status call and search keystroke.
-            //
-            // NOT during a reset: ResetIndexCore cancels this build, then deletes the index
-            // directory, then re-arms and rebuilds itself. Re-arming here would let a status
-            // poll start a build into the directory that reset is about to delete — and that
-            // build's own failure would burn another attempt, so one unlucky reset could
-            // exhaust the budget and kill catalog search for the process.
-            // Interlocked: two builds can be in flight across a re-arm, and a lost increment
-            // would turn a bounded retry into an unbounded one.
-            int failures = Interlocked.Increment(ref _failedBuilds);
-            bool resetOwnsTheRebuild;
-            lock (_lock) { resetOwnsTheRebuild = _resetInFlight; }
-            if (resetOwnsTheRebuild)
-            {
-                logger.LogInformation("catalog TOC index build failed during a reset — the reset will rebuild");
-            }
-            else if (failures < MaxBuildAttempts)
-            {
-                lock (_lock) { _buildStarted = false; }
-            }
-            else
-            {
-                logger.LogWarning("catalog TOC index: giving up after {Attempts} failed build attempts",
-                    failures);
-            }
-        }
-        finally
-        {
-            _isIndexing = false;
-        }
-    }
-
-    /// <summary>
-    /// Called by the DB change watcher while the service runs: if the seforim DB's
-    /// current change-stamp no longer matches the built index's stamp, kick off a
-    /// background rebuild (the old index keeps serving via the NRT reader meanwhile).
-    /// Returns true if a rebuild was started. A spurious call where nothing changed
-    /// costs one cheap stamp read and does nothing.
-    /// </summary>
-    public bool RebuildIfDbChanged()
-    {
-        if (!HasDb) return false;
-        string current;
-        try { current = CatalogTocIndex.ComputeDbHash(_dbPath!); }
-        catch { return false; }
-
-        lock (_lock)
-        {
-            // Already rebuilding for a change → don't stack another.
-            if (_isIndexing) return false;
-            string? active = GetIndex().ActiveHash;
-            if (string.Equals(active, current, StringComparison.OrdinalIgnoreCase))
-                return false; // unchanged — nothing to do
-
-            // Re-arm EnsureIndex to run again (it is latched to once-per-process), then
-            // let it do the stamp compare + background BuildAndSwitch it already knows.
-            _buildStarted = false;
-        }
-        EnsureIndex();
-        return true;
-    }
-
-    /// <summary>Wipe and rebuild from scratch (dev reset). Returns immediately.</summary>
-    public void ResetIndex()
-    {
-        _ = Task.Run(() =>
-        {
-            // Fire-and-forget: without this catch a failure is an unobserved task exception and
-            // the reset silently half-completes (index disposed, nothing rebuilding).
-            try { ResetIndexCore(); }
-            catch (Exception ex) { logger.LogError(ex, "catalog TOC index reset failed"); }
-        });
-    }
-
-    private void ResetIndexCore()
-    {
-        Task? build;
-        lock (_lock)
-        {
-            // Claimed before the cancel: from here a failing build defers to this reset
-            // instead of re-arming the latch and racing a build into the directory that is
-            // about to be deleted.
-            _resetInFlight = true;
-            _buildCts?.Cancel();
-            build = _buildTask;
-        }
-        try
-        {
-            // Wait until the build has actually unwound — the old 30s cap was discarded and
-            // the code deleted the index directory anyway, while BuildAndSwitch could still
-            // be writing through the CatalogTocIndex disposed just below. This runs on a
-            // background task, so waiting blocks no caller.
-            if (build != null)
-            {
-                if (!build.Wait(TimeSpan.FromSeconds(30)))
-                    logger.LogWarning(
-                        "catalog TOC reset: build still unwinding after 30s — waiting before deleting the index");
-                try { build.Wait(); } catch { /* cancelled or faulted */ }
-            }
-
-            // Searches run outside _lock, so cancel the in-flight one BEFORE disposing the
-            // index it is reading; a query that still lands mid-dispose comes back Superseded.
-            // The search owns its CTS (disposed when Search returns), so it may already be
-            // gone by the time we get here — that means it finished on its own.
-            try { Interlocked.Exchange(ref _searchCts, null)?.Cancel(); }
-            catch (ObjectDisposedException) { /* search already completed and disposed it */ }
-
-            lock (_lock)
-            {
-                _index?.Dispose();
-                _index = null;
-                try { if (Directory.Exists(_indexPath)) Directory.Delete(_indexPath, recursive: true); }
-                catch (Exception ex) { logger.LogError(ex, "catalog TOC index reset: delete failed"); }
-                _isReady = false;
-                _isIndexing = false;
-                _buildStarted = false;
-                _buildTask = null;
-                _buildCts = null;
-            }
-        }
-        finally
-        {
-            // Released before EnsureIndex so the rebuild it starts is a normal build whose
-            // own failure may re-arm the latch again. Cleared even if a step above threw —
-            // a stuck flag would silently disable the failure-retry path for good.
-            lock (_lock) { _resetInFlight = false; }
-        }
-        logger.LogInformation("catalog TOC index reset — rebuilding");
-        EnsureIndex();
-    }
-
-    /// <summary>Graceful shutdown: cancel the in-flight build and wait for it to unwind
-    /// so the Lucene writer is disposed cleanly. The ver file is written only on full
-    /// completion, so an interrupted build is treated as stale and simply rebuilt next
-    /// run.</summary>
-    public void Shutdown()
-    {
-        Task? build;
-        lock (_lock)
-        {
-            _buildCts?.Cancel();
-            build = _buildTask;
-        }
-        try { build?.Wait(TimeSpan.FromSeconds(25)); } catch { /* cancelled */ }
-    }
-
-    public CatalogTocStatus Status()
-    {
-        EnsureIndex();
-        // A near-real-time reader during a build counts as ready (partial results).
-        bool ready = _isReady || (HasDb && GetIndex().TryOpenActive());
-        if (ready) _isReady = true;
-        return new CatalogTocStatus
-        {
-            Ready = ready,
-            Indexing = _isIndexing,
-            BuiltBooks = _builtBooks,
-            TotalBooks = _totalBooks,
-            DbMissing = !HasDb,
-        };
-    }
-
-    // A new search SUPERSEDES the previous in-flight one (latest-wins) so an abandoned
-    // heavy query stops burning cores as soon as the user keeps typing.
-    private CancellationTokenSource? _searchCts;
-
-    /// <summary>Run a catalog TOC-path search. Results are NEVER capped; ordering is
-    /// (Level, TreeOrder) only.</summary>
-    public CatalogTocSearchResult Search(string query)
-    {
-        EnsureIndex();
-        var result = new CatalogTocSearchResult();
-
-        // Ready as soon as a reader exists — during a build the near-real-time reader
-        // serves partial results, so we don't gate on the build finishing. Only report
-        // not-ready when there is genuinely no reader yet (DB missing, or the very first
-        // build hasn't opened its reader in this split second).
-        bool ready = _isReady || (HasDb && GetIndex().TryOpenActive());
-        if (!ready)
-        {
-            result.Ready = false;
-            return result;
-        }
-        _isReady = true;
-        result.Ready = true;
-        if (string.IsNullOrWhiteSpace(query)) return result;
-
-        using var cts = new CancellationTokenSource();
-        var prev = Interlocked.Exchange(ref _searchCts, cts);
-        // Cancel the superseded search: without the `using` above, one CTS per keystroke-search
-        // accumulates for the service's lifetime — each is finalizable and holds an internal
-        // registration list. Cancel() first — disposing a CTS does not cancel it.
-        //
-        // We deliberately do NOT dispose `prev` here. Its owning Search call is still on
-        // another thread reading that token, and disposing underneath it would throw
-        // ObjectDisposedException into the middle of that search. Each Search disposes its
-        // own CTS via the `using` above once it unwinds — Cancel() is what makes it unwind
-        // promptly. ObjectDisposedException below: it already got there on its own.
-        if (prev is not null)
-        {
-            try { prev.Cancel(); } catch (ObjectDisposedException) { }
-        }
-        try
-        {
-            result.Results = GetIndex().Search(query, cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            result.Superseded = true;   // a newer search took over — caller discards this
-        }
-        catch (Exception ex) when (ex is ObjectDisposedException
-                                      or DirectoryNotFoundException
-                                      or FileNotFoundException)
-        {
-            // ResetIndex ran under us: it disposes the index (searches are cancelled first, but
-            // the last stretch of a query is not inside a lock) and deletes the directory the
-            // reader's files live in. Neither is a search failure — same contract as a
-            // supersede: the caller discards this and the rebuild serves the next one. Reported
-            // as an error instead, the UI showed "no results" for a perfectly good query.
-            result.Superseded = true;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "catalog TOC search failed");
-            result.Error = ex.Message;
-        }
-        finally
-        {
-            Interlocked.CompareExchange(ref _searchCts, null, cts);
-        }
-        return result;
-    }
+    public CatalogTocSearchResult Search(string query) => _coordinator.Search(query);
 }
 
 /// <summary>Kicks off the catalog TOC index check/build at service start (hash compare
@@ -402,30 +104,10 @@ public sealed class CatalogTocIndexingStarter(CatalogTocSearchService catalogToc
 }
 
 // ── RPC DTOs ─────────────────────────────────────────────────────────────────────
+// CatalogTocSearchResult and CatalogTocStatus are Core's (SeforimDbCatalogModels).
 
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class CatalogTocSearchArgs
 {
     public string? Query { get; set; }
-}
-
-[MessagePack.MessagePackObject(keyAsPropertyName: true)]
-public sealed class CatalogTocSearchResult
-{
-    /// <summary>False while no index is available yet (first build) — retry later.</summary>
-    public bool Ready { get; set; }
-    public List<CatalogTocHit> Results { get; set; } = new();
-    /// <summary>True when a newer search cancelled this one — discard this response.</summary>
-    public bool Superseded { get; set; }
-    public string? Error { get; set; }
-}
-
-[MessagePack.MessagePackObject(keyAsPropertyName: true)]
-public sealed class CatalogTocStatus
-{
-    public bool Ready { get; set; }
-    public bool Indexing { get; set; }
-    public int BuiltBooks { get; set; }
-    public int TotalBooks { get; set; }
-    public bool DbMissing { get; set; }
 }

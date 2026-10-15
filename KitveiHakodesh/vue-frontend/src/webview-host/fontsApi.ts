@@ -4,20 +4,16 @@ import { detectFontsByCanvas } from './fontsCanvasProbe'
 /**
  * Real system font families that can render Hebrew, sorted alphabetically.
  *
- * Both modes ask the OS, so the picker offers the machine's ACTUAL Hebrew fonts:
- *   Hosted: the C# host enumerates via DirectWrite (`getFonts` → Helpers/FontsProvider).
- *   Dev: the KitveiHakodesh service enumerates the same way (`getFonts` →
- *        HebrewFontsProvider — the two providers are TWIN files).
+ * Both runtimes ask the OS through DirectWrite, so the picker offers the machine's ACTUAL
+ * Hebrew fonts: the WebView2 host enumerates in its own process (`getFonts` host action —
+ * nothing about fonts needs the service or an external library), the dev browser asks the
+ * service, which runs the same enumerator.
  *
- * fontsCanvasProbe is the last resort when neither is reachable. It can only confirm fonts its
- * own CANDIDATES list names, so it under-reports — but a plausible subset beats an empty picker,
- * and the two real enumerators are what normally answer.
+ * fontsCanvasProbe is the last resort when neither answers. It can only confirm fonts its own
+ * CANDIDATES list names, so it under-reports — but a plausible subset beats an empty picker.
  *
- * Lives here rather than in utils/ because it is entirely host I/O: it talks to the C# bridge or
- * the service and knows which of the two to ask. A util may not invoke a host action.
- *
- * NOTE: `isHosted` is TRUE in dev, so it cannot pick the path — branch on __webviewAction
- * (present only in the real WebView2 host) and let dev go to the service.
+ * Lives here rather than in utils/ because it is entirely host I/O. A util may not invoke a
+ * host action.
  *
  * Deliberately NOT cached: the selector loads the list live on every dropdown open (showing a
  * loading row meanwhile), so a long-running session always sees the machine's current fonts —
@@ -34,9 +30,10 @@ import { detectFontsByCanvas } from './fontsCanvasProbe'
  * A name repeated by the enumerator is de-duplicated in favour of this entry, so a
  * user who ALSO has the font installed system-wide still sees one row, at the top.
  *
- * Ordered te'amim-capable families first, then Heebo. Every family above Heebo draws
- * the cantillation marks, so anything a reader picks from the head of this list is
- * safe for a hasTeamim book; Heebo trails because it is a headings sans with none.
+ * Ordered te'amim-capable families first, then commentary and display fonts. Every family
+ * except Heebo draws the cantillation marks, so anything a reader picks from the head of
+ * this list is safe for a hasTeamim book; Noto Rashi Hebrew is for commentary, and Heebo
+ * is for headings only, both without te'amim support.
  */
 export const BUNDLED_FONTS = [
   'Taamey Frank CLM',
@@ -44,6 +41,8 @@ export const BUNDLED_FONTS = [
   'Simple CLM',
   'Stam Ashkenaz CLM',
   'Stam Sefarad CLM',
+  'Frank Ruehl Libre',
+  'Noto Rashi Hebrew',
   'Heebo',
 ] as const
 
@@ -53,22 +52,27 @@ function withBundledFirst(systemFonts: string[]): string[] {
   return [...bundled, ...systemFonts.filter((f) => !bundled.includes(f))]
 }
 
-export async function detectAvailableFonts(): Promise<string[]> {
-  if (typeof window.__webviewAction === 'function') {
-    try {
-      const result = await window.__webviewAction('getFonts')
-      const fonts = (result as { fonts?: string[] }).fonts
-      if (Array.isArray(fonts) && fonts.length > 0) return withBundledFirst(fonts)
-    } catch {
-      // Host bridge unavailable — fall through to the canvas probe.
-    }
-  } else {
-    try {
-      const result = await serviceCall<{ fonts?: string[] }>('getFonts')
-      if (Array.isArray(result?.fonts) && result.fonts.length > 0) return withBundledFirst(result.fonts)
-    } catch {
-      // Service unreachable — fall through to the canvas probe.
-    }
+/**
+ * Module-level cache: a single Promise set on the first call and reused for the
+ * lifetime of the page. A hard reload clears it because the module is re-evaluated.
+ * Every FontSelector dropdown shares one fetch — subsequent opens are instant.
+ */
+let _fontsCache: Promise<string[]> | null = null
+
+async function fetchFonts(): Promise<string[]> {
+  try {
+    const result =
+      typeof window.__webviewAction === 'function'
+        ? ((await window.__webviewAction('getFonts')) as { fonts?: string[] })
+        : await serviceCall<{ fonts?: string[] }>('getFonts')
+    if (Array.isArray(result?.fonts) && result.fonts.length > 0) return withBundledFirst(result.fonts)
+  } catch {
+    // Host or service unreachable — fall through to the canvas probe.
   }
   return withBundledFirst(await detectFontsByCanvas())
+}
+
+export function detectAvailableFonts(): Promise<string[]> {
+  if (!_fontsCache) _fontsCache = fetchFonts()
+  return _fontsCache
 }

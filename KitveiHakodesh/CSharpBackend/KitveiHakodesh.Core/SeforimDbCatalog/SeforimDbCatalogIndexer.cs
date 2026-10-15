@@ -155,7 +155,7 @@ public sealed partial class SeforimDbCatalogIndex : IDisposable
     /// the acronym and the expanded author name match.
     ///
     /// NOTE for future edits: the change stamp covers the seforim DB + this version string
-    /// only — it does NOT fingerprint catalog_abbreviations.json. Editing the map therefore
+    /// only — it does NOT fingerprint the abbreviation map. Editing the map therefore
     /// does NOT invalidate an existing index; bump this version or the stale index keeps
     /// serving tokens normalized under the OLD map.
     /// v19: audited every entry against the DB's raw vocabulary and fixed what the audit
@@ -279,7 +279,8 @@ public sealed partial class SeforimDbCatalogIndex : IDisposable
         var categoryList = LoadCategories(conn);
         var books = LoadBooks(conn);
         var firstLines = LoadFirstLines(conn);
-        var bookRank = ComputeTreeOrders(categoryList, books);
+        var bookRank = SeforimDbBookTreeOrder.Compute(
+            categoryList.ConvertAll(c => (c.Id, c.ParentId)), books.ConvertAll(b => (b.Id, b.CategoryId)));
         var altStructures = LoadAltStructures(conn);
 
         // Full catalog (category) path per book — part of SearchText so a query can
@@ -423,6 +424,10 @@ public sealed partial class SeforimDbCatalogIndex : IDisposable
         List<(int Id, string Title, int CategoryId, string? Authors)> books,
         Func<int, long> treeOrder, Dictionary<int, string> catalogPathByBook, CancellationToken ct)
     {
+        // One probe and one dictionary load for the whole Tanach scan, rather than per book.
+        var schema = SeforimDbSchema.Probe(conn);
+        using var codec = SeforimDbLineContentCodec.Create(conn);
+
         int added = 0;
         foreach (var book in books)
         {
@@ -454,13 +459,13 @@ public sealed partial class SeforimDbCatalogIndex : IDisposable
             int chapterLevel = 0;
 
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.CatalogIndexBookLines;
+            cmd.CommandText = SeforimDbSqlStrings.CatalogIndexBookLines(schema);
             cmd.Parameters.AddWithValue("@b", book.Id);
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
                 int lineIndex = reader.IsDBNull(0) ? -1 : reader.GetInt32(0);
-                string content = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                string content = codec.DecodeColumnOrEmpty(reader, 1);
 
                 // Advance to the TOC entry this line belongs to (reset the verse counter).
                 while (entryIdx + 1 < entries.Count && entries[entryIdx + 1].LineIndex <= lineIndex)
@@ -795,63 +800,6 @@ public sealed partial class SeforimDbCatalogIndex : IDisposable
         return map;
     }
 
-    /// <summary>
-    /// Each book's position in the catalog tree — identical to the frontend's
-    /// buildTree + assignFullPaths (bookCatalogTree.ts): categories nested in load
-    /// order, custom (negative-id) entries sorted last per level, orphaned books under
-    /// a synthetic last root, then a DFS that numbers books as encountered.
-    /// </summary>
-    private static Dictionary<int, int> ComputeTreeOrders(
-        List<(int Id, int? ParentId, string Title)> categories,
-        List<(int Id, string Title, int CategoryId, string? Authors)> books)
-    {
-        var children = new Dictionary<int, List<int>>();   // categoryId → child category ids
-        var catBooks = new Dictionary<int, List<int>>();   // categoryId → book ids
-        var known = new HashSet<int>();
-        foreach (var c in categories) known.Add(c.Id);
-
-        var roots = new List<int>();
-        foreach (var c in categories)
-        {
-            if (c.ParentId is { } pid && known.Contains(pid))
-                (children.TryGetValue(pid, out var l) ? l : children[pid] = []).Add(c.Id);
-            else roots.Add(c.Id);
-        }
-
-        var orphaned = new List<int>();
-        foreach (var b in books)
-        {
-            if (known.Contains(b.CategoryId))
-                (catBooks.TryGetValue(b.CategoryId, out var l) ? l : catBooks[b.CategoryId] = []).Add(b.Id);
-            else orphaned.Add(b.Id);
-        }
-
-        static int CustomLast(int id) => id < 0 ? 1 : 0;
-        foreach (var l in children.Values) StableSortByCustomLast(l);
-        foreach (var l in catBooks.Values) StableSortByCustomLast(l);
-        StableSortByCustomLast(roots);
-
-        var orders = new Dictionary<int, int>(books.Count);
-        int counter = 0;
-        void Walk(int categoryId)
-        {
-            if (catBooks.TryGetValue(categoryId, out var bs))
-                foreach (int bookId in bs) orders[bookId] = counter++;
-            if (children.TryGetValue(categoryId, out var cs))
-                foreach (int child in cs) Walk(child);
-        }
-        foreach (int root in roots) Walk(root);
-        foreach (int bookId in orphaned) orders[bookId] = counter++; // synthetic last root
-
-        return orders;
-
-        static void StableSortByCustomLast(List<int> ids)
-        {
-            var sorted = ids.OrderBy(CustomLast).ToList();
-            ids.Clear();
-            ids.AddRange(sorted);
-        }
-    }
 
     /// <summary>All alt-TOC structures: structureId → owning bookId.</summary>
     private static Dictionary<int, (int BookId, string Title, string HeTitle)> LoadAltStructures(SqliteConnection conn)

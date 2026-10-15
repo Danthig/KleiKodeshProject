@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Linq;
 using Microsoft.Data.Sqlite;
 using KitveiHakodesh.Core.Settings;
 
@@ -117,12 +119,22 @@ namespace KitveiHakodesh.Core.SeforimDb
             return book;
         }
 
-        public List<LineRow> GetLinesPaged(int bookId, int limit, int offset)
+        /// <param name="versionId">0 for the book's own text; a book_version id to read the
+        /// page through that version's overlay instead. See
+        /// <see cref="SeforimDbSqlStrings.GetVersionLinesPaged"/> for what an overlay does and
+        /// does not replace.</param>
+        public List<LineRow> GetLinesPaged(int bookId, int limit, int offset, int versionId = 0)
         {
             var list = new List<LineRow>();
             using var conn = Open();
+            using var codec = CodecFor(conn);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetLinesPaged;
+            var schema = SchemaOf(conn);
+            bool isVersionRead = versionId > 0;
+            cmd.CommandText = isVersionRead
+                ? SeforimDbSqlStrings.GetVersionLinesPaged(schema)
+                : SeforimDbSqlStrings.GetLinesPaged(schema);
+            if (isVersionRead) cmd.Parameters.AddWithValue("@versionId", versionId);
             cmd.Parameters.AddWithValue("@bookId", bookId);
             cmd.Parameters.AddWithValue("@limit", limit);
             cmd.Parameters.AddWithValue("@offset", offset);
@@ -133,10 +145,41 @@ namespace KitveiHakodesh.Core.SeforimDb
                 {
                     Id = r.GetInt32(0),
                     LineIndex = r.IsDBNull(1) ? 0 : r.GetInt32(1),
-                    Content = r.IsDBNull(2) ? "" : r.GetString(2),
+                    Content = isVersionRead
+                        ? ReadVersionLineContent(r, codec)
+                        : codec.DecodeColumnOrEmpty(r, 2),
                 });
             }
             return list;
+        }
+
+        /// <summary>
+        /// The text of one row of <see cref="SeforimDbSqlStrings.GetVersionLinesPaged"/>.
+        ///
+        /// That statement hands back BOTH candidate columns plus a discriminator rather than
+        /// choosing in SQL, because a CASE that mixes a BLOB arm with a text arm makes SQLite
+        /// coerce the blob to TEXT and the compressed frame arrives as unreadable bytes. The
+        /// choice is made here instead, where each column keeps its own type and goes through
+        /// the codec intact.
+        /// </summary>
+        private static string ReadVersionLineContent(SqliteDataReader r, SeforimDbLineContentCodec codec)
+        {
+            const int BaseContentOrdinal = 2;
+            const int VersionContentOrdinal = 3;
+            const int ContentSourceOrdinal = 4;
+
+            int contentSource = r.IsDBNull(ContentSourceOrdinal)
+                ? SeforimDbSqlStrings.VersionLineContentSource.Uncovered
+                : r.GetInt32(ContentSourceOrdinal);
+
+            return contentSource switch
+            {
+                SeforimDbSqlStrings.VersionLineContentSource.Base
+                    => codec.DecodeColumnOrEmpty(r, BaseContentOrdinal),
+                SeforimDbSqlStrings.VersionLineContentSource.Version
+                    => codec.DecodeColumnOrEmpty(r, VersionContentOrdinal),
+                _ => string.Empty,
+            };
         }
 
         // ── TOC ──────────────────────────────────────────────────────────────────
@@ -289,25 +332,24 @@ namespace KitveiHakodesh.Core.SeforimDb
             return list;
         }
 
-        // Whether the link_anchor table exists (SeforimLibrary schema v2+; neither current
-        // Zayit nor Otzaria v1 DB has it). Detected once — the seforim DB is static for the
-        // life of the process (see _linkHasTargetLineIndex).
+        // Whether the link_anchor table exists (Otzaria has it; Zayit does not, and its word
+        // links come from the inline commentator markers instead). Detected once — the seforim
+        // DB is static for the life of the process (see _linkHasTargetLineIndex).
         private bool? _hasLinkAnchorTable;
 
-        /// <summary>Word-level link anchors for a batch of source lines. Returns Supported=false
-        /// (and no rows) on DBs whose schema predates link_anchor, so callers can stop asking.</summary>
+        /// <summary>Word-level link anchors for a batch of source lines — from link_anchor, or on
+        /// a database without it, from the inline commentator markers. Always Supported.</summary>
         public WordLinkAnchorsResult GetWordLinkAnchorsForLines(List<int> lineIds)
         {
-            var result = new WordLinkAnchorsResult();
-            if (lineIds is null || lineIds.Count == 0)
-            {
-                result.Supported = _hasLinkAnchorTable ?? true; // unknown yet — don't tell callers to stop
-                return result;
-            }
+            var result = new WordLinkAnchorsResult { Supported = true };
+            if (lineIds is null || lineIds.Count == 0) return result;
             using var conn = Open();
             _hasLinkAnchorTable ??= TableExists(conn, "link_anchor");
-            result.Supported = _hasLinkAnchorTable.Value;
-            if (!result.Supported) return result;
+            if (!_hasLinkAnchorTable.Value)
+            {
+                result.Rows = GetInlineMarkerAnchorsForLines(conn, lineIds);
+                return result;
+            }
             _linkHasTargetLineIndex ??= ColumnExists(conn, "link", "targetLineIndex");
             using var cmd = conn.CreateCommand();
             cmd.CommandText = SeforimDbSqlStrings.GetWordLinkAnchorsForLines(lineIds.Count, _linkHasTargetLineIndex.Value);
@@ -331,14 +373,18 @@ namespace KitveiHakodesh.Core.SeforimDb
         }
 
         /// <summary>Distinct word-link targets (commentary book id + anchor label) for one source
-        /// book. Returns Supported=false (and no rows) on DBs whose schema predates link_anchor.</summary>
+        /// book — from link_anchor, or from the inline commentator markers. Always Supported.</summary>
         public WordLinkTargetsResult GetWordLinkAnchorTargetsForBook(int bookId)
         {
             var result = new WordLinkTargetsResult();
             using var conn = Open();
             _hasLinkAnchorTable ??= TableExists(conn, "link_anchor");
-            result.Supported = _hasLinkAnchorTable.Value;
-            if (!result.Supported) return result;
+            result.Supported = true;
+            if (!_hasLinkAnchorTable.Value)
+            {
+                result.Rows = InlineMarkerResolutionFor(conn, bookId).Targets;
+                return result;
+            }
             using var cmd = conn.CreateCommand();
             cmd.CommandText = SeforimDbSqlStrings.GetWordLinkAnchorTargetsForBook;
             cmd.Parameters.AddWithValue("@bookId", bookId);
@@ -354,17 +400,111 @@ namespace KitveiHakodesh.Core.SeforimDb
             return result;
         }
 
+        // Per source book: what its inline commentator-marker names resolve to. Static for the
+        // life of the process, like the rest of this database.
+        private readonly ConcurrentDictionary<int, SeforimDbInlineCommentatorMarkers.BookResolution> _inlineMarkerBooks = new();
+
+        /// <summary>Word-link anchors built from the inline commentator markers in the line text —
+        /// the stand-in for link_anchor on databases that lack it. See
+        /// <see cref="SeforimDbInlineCommentatorMarkers"/>.</summary>
+        private List<WordLinkAnchorRow> GetInlineMarkerAnchorsForLines(SqliteConnection conn, List<int> lineIds)
+        {
+            var rows = new List<WordLinkAnchorRow>();
+
+            var markerLines = new List<(int LineId, int BookId, List<SeforimDbInlineCommentatorMarkers.Marker> Markers)>();
+            using (var codec = CodecFor(conn))
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = SeforimDbSqlStrings.GetLineBookIdsAndContents(SchemaOf(conn), lineIds.Count);
+                BindList(cmd, "p", lineIds);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var markers = SeforimDbInlineCommentatorMarkers.Parse(codec.DecodeColumnOrEmpty(r, 2));
+                    if (markers.Count > 0) markerLines.Add((r.GetInt32(0), r.GetInt32(1), markers));
+                }
+            }
+            if (markerLines.Count == 0) return rows;
+
+            var withMarkers = markerLines.Select(l => l.LineId).ToList();
+            var linkedLines = new Dictionary<int, List<SeforimDbInlineCommentatorMarkers.LinkedLine>>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = SeforimDbSqlStrings.GetLinkedLinesForLines(withMarkers.Count);
+                BindList(cmd, "p", withMarkers);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    int lineId = r.GetInt32(0);
+                    if (!linkedLines.TryGetValue(lineId, out var list)) linkedLines[lineId] = list = new();
+                    list.Add(new SeforimDbInlineCommentatorMarkers.LinkedLine(r.GetInt32(1), r.GetInt32(2), r.GetInt32(3)));
+                }
+            }
+
+            foreach (var line in markerLines)
+            {
+                if (!linkedLines.TryGetValue(line.LineId, out var linked)) continue;
+                var resolution = InlineMarkerResolutionFor(conn, line.BookId);
+                rows.AddRange(SeforimDbInlineCommentatorMarkers.AnchorsForLine(
+                    line.LineId, line.BookId, line.Markers, linked, resolution));
+            }
+            rows.Sort((a, b) => a.LineId != b.LineId ? a.LineId.CompareTo(b.LineId) : a.CharStart.CompareTo(b.CharStart));
+            return rows;
+        }
+
+        /// <summary>Resolves one source book's marker names, once: reads every line of the book
+        /// and the books each line is linked with.</summary>
+        private SeforimDbInlineCommentatorMarkers.BookResolution InlineMarkerResolutionFor(SqliteConnection conn, int bookId)
+        {
+            if (_inlineMarkerBooks.TryGetValue(bookId, out var cached)) return cached;
+
+            var markersByLine = new Dictionary<int, List<SeforimDbInlineCommentatorMarkers.Marker>>();
+            using (var codec = CodecFor(conn))
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = SeforimDbSqlStrings.GetBookLineContents(SchemaOf(conn));
+                cmd.Parameters.AddWithValue("@bookId", bookId);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var markers = SeforimDbInlineCommentatorMarkers.Parse(codec.DecodeColumnOrEmpty(r, 1));
+                    if (markers.Count > 0) markersByLine[r.GetInt32(0)] = markers;
+                }
+            }
+
+            var linkedBooks = new Dictionary<int, HashSet<int>>();
+            if (markersByLine.Count > 0)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = SeforimDbSqlStrings.GetLinkedBooksForBookLines;
+                cmd.Parameters.AddWithValue("@bookId", bookId);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    int lineId = r.GetInt32(0);
+                    if (!markersByLine.ContainsKey(lineId)) continue;
+                    if (!linkedBooks.TryGetValue(lineId, out var set)) linkedBooks[lineId] = set = new();
+                    set.Add(r.GetInt32(1));
+                }
+            }
+
+            var resolution = SeforimDbInlineCommentatorMarkers.ResolveBook(
+                markersByLine.Select(kv => (kv.Value, linkedBooks.TryGetValue(kv.Key, out var set) ? set : new HashSet<int>())));
+            return _inlineMarkerBooks.GetOrAdd(bookId, resolution);
+        }
+
         public List<LineContentRow> GetLineContents(List<int> lineIds)
         {
             var list = new List<LineContentRow>();
             if (lineIds is null || lineIds.Count == 0) return list;
             using var conn = Open();
+            using var codec = CodecFor(conn);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetLineContents(lineIds.Count);
+            cmd.CommandText = SeforimDbSqlStrings.GetLineContents(SchemaOf(conn), lineIds.Count);
             BindList(cmd, "p", lineIds);
             using var r = cmd.ExecuteReader();
             while (r.Read())
-                list.Add(new LineContentRow { Id = r.GetInt32(0), Content = r.IsDBNull(1) ? "" : r.GetString(1) });
+                list.Add(new LineContentRow { Id = r.GetInt32(0), Content = codec.DecodeColumnOrEmpty(r, 1) });
             return list;
         }
 
@@ -400,8 +540,9 @@ namespace KitveiHakodesh.Core.SeforimDb
             var list = new List<ReverseLineRow>();
             if (lineIds is null || lineIds.Count == 0 || typeIds is null || typeIds.Count == 0) return list;
             using var conn = Open();
+            using var codec = CodecFor(conn);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetReverseLineData(lineIds.Count, typeIds.Count);
+            cmd.CommandText = SeforimDbSqlStrings.GetReverseLineData(SchemaOf(conn), lineIds.Count, typeIds.Count);
             BindList(cmd, "t", lineIds);
             BindList(cmd, "c", typeIds);
             using var r = cmd.ExecuteReader();
@@ -412,7 +553,7 @@ namespace KitveiHakodesh.Core.SeforimDb
                     SourceBookId = r.IsDBNull(0) ? 0 : r.GetInt32(0),
                     SourceLineId = r.IsDBNull(1) ? 0 : r.GetInt32(1),
                     LineIndex = r.IsDBNull(2) ? 0 : r.GetInt32(2),
-                    Content = r.IsDBNull(3) ? "" : r.GetString(3),
+                    Content = codec.DecodeColumnOrEmpty(r, 3),
                 });
             }
             return list;
@@ -424,7 +565,7 @@ namespace KitveiHakodesh.Core.SeforimDb
             if (typeIds is null || typeIds.Count == 0) return list;
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetReverseBooks(typeIds.Count);
+            cmd.CommandText = SeforimDbSqlStrings.GetReverseBooks(SchemaOf(conn), typeIds.Count);
             cmd.Parameters.AddWithValue("@bookId", bookId);
             BindList(cmd, "c", typeIds);
             using var r = cmd.ExecuteReader();
@@ -604,56 +745,200 @@ namespace KitveiHakodesh.Core.SeforimDb
             return list;
         }
 
-        public List<BoldLineRow> GetLinesWithContentPatternForBooks(List<int> bookIds, string pattern)
-        {
-            var list = new List<BoldLineRow>();
-            if (bookIds is null || bookIds.Count == 0) return list;
-            using var conn = Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetLinesWithContentPatternForBooks(bookIds.Count);
-            BindList(cmd, "b", bookIds);
-            cmd.Parameters.AddWithValue("@pattern", pattern);
-            using var r = cmd.ExecuteReader();
-            while (r.Read())
-            {
-                list.Add(new BoldLineRow
-                {
-                    Content = r.IsDBNull(0) ? "" : r.GetString(0),
-                    Title = r.IsDBNull(1) ? "" : r.GetString(1),
-                    BookId = r.IsDBNull(2) ? 0 : r.GetInt32(2),
-                    LineId = r.IsDBNull(3) ? 0 : r.GetInt32(3),
-                    LineIndex = r.IsDBNull(4) ? 0 : r.GetInt32(4),
-                });
-            }
-            return list;
-        }
-
-        public List<RawLineRow> GetLinesWithEitherContentPattern(int bookId, string p1, string p2)
-        {
-            var list = new List<RawLineRow>();
-            using var conn = Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetLinesWithEitherContentPattern;
-            cmd.Parameters.AddWithValue("@bookId", bookId);
-            cmd.Parameters.AddWithValue("@p1", p1);
-            cmd.Parameters.AddWithValue("@p2", p2);
-            using var r = cmd.ExecuteReader();
-            while (r.Read())
-                list.Add(new RawLineRow { Id = r.GetInt32(0), LineIndex = r.IsDBNull(1) ? 0 : r.GetInt32(1), Content = r.IsDBNull(2) ? "" : r.GetString(2) });
-            return list;
-        }
-
         public List<RawLineRow> GetLineByBookAndLineIndex(int bookId, int lineIndex)
         {
             var list = new List<RawLineRow>();
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = SeforimDbSqlStrings.GetLineByBookAndLineIndex;
+            using var codec = CodecFor(conn);
+            cmd.CommandText = SeforimDbSqlStrings.GetLineByBookAndLineIndex(SchemaOf(conn));
             cmd.Parameters.AddWithValue("@bookId", bookId);
             cmd.Parameters.AddWithValue("@lineIndex", lineIndex);
             using var r = cmd.ExecuteReader();
             while (r.Read())
-                list.Add(new RawLineRow { Id = r.GetInt32(0), LineIndex = r.IsDBNull(1) ? 0 : r.GetInt32(1), Content = r.IsDBNull(2) ? "" : r.GetString(2) });
+                list.Add(new RawLineRow { Id = r.GetInt32(0), LineIndex = r.IsDBNull(1) ? 0 : r.GetInt32(1), Content = codec.DecodeColumnOrEmpty(r, 2) });
+            return list;
+        }
+
+        // ── Book versions, provenance and schema stamp ───────────────────────────────
+
+        /// <summary>Whether this database has the version-overlay tables at all. Probed once:
+        /// they arrive in a later library schema and a book view asks on every open.</summary>
+        private bool? _hasBookVersionTables;
+
+
+        /// <summary>
+        /// The alternate text versions of a book, best first. Empty on a library whose schema
+        /// predates the version tables — that is a shape, not a failure, so the caller simply
+        /// shows no version picker.
+        /// </summary>
+        public List<BookVersionRow> GetBookVersions(int bookId)
+        {
+            var list = new List<BookVersionRow>();
+            using var conn = Open();
+
+            _hasBookVersionTables ??= TableExists(conn, "book_version") && TableExists(conn, "version_line");
+            if (!_hasBookVersionTables.Value) return list;
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = SeforimDbSqlStrings.GetBookVersions;
+            cmd.Parameters.AddWithValue("@bookId", bookId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new BookVersionRow
+                {
+                    Id = r.GetInt32(0),
+                    VersionTitle = r.IsDBNull(1) ? "" : r.GetString(1),
+                    HeVersionTitle = r.IsDBNull(2) ? null : r.GetString(2),
+                    VersionSource = r.IsDBNull(3) ? null : r.GetString(3),
+                    VersionNotes = r.IsDBNull(4) ? null : r.GetString(4),
+                    HeVersionNotes = r.IsDBNull(5) ? null : r.GetString(5),
+                });
+            }
+            return list;
+        }
+
+        /// <summary>The upstream source a book came from, for crediting a report.</summary>
+        public List<BookSourceNameRow> GetBookSourceName(int bookId)
+        {
+            var list = new List<BookSourceNameRow>();
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = SeforimDbSqlStrings.GetBookSourceName;
+            cmd.Parameters.AddWithValue("@bookId", bookId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(new BookSourceNameRow { SourceName = r.IsDBNull(0) ? "" : r.GetString(0) });
+            return list;
+        }
+
+        /// <summary>
+        /// Everything the library records about a book, for the book view's info popover.
+        /// Null when the book does not exist. Both library schemas are probed per call rather
+        /// than cached: it runs once per click, and the user can swap databases under us.
+        /// </summary>
+        public BookMetadataRow? GetBookMetadata(int bookId)
+        {
+            using var conn = Open();
+
+            string descriptionColumn = ColumnExists(conn, "book", "heDesc") ? "b.heDesc" : "NULL";
+            string collectiveTitleColumn = ColumnExists(conn, "book", "collectiveTitleHe") ? "b.collectiveTitleHe" : "NULL";
+
+            BookMetadataRow? metadata = null;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = SeforimDbSqlStrings.GetBookMetadata(descriptionColumn, collectiveTitleColumn);
+                cmd.Parameters.AddWithValue("@bookId", bookId);
+                using var r = cmd.ExecuteReader();
+                if (r.Read())
+                {
+                    metadata = new BookMetadataRow
+                    {
+                        Title = r.IsDBNull(0) ? "" : r.GetString(0),
+                        HeRef = ReadTextOrNull(r, 1),
+                        ShortDescription = ReadTextOrNull(r, 2),
+                        Description = ReadTextOrNull(r, 3),
+                        CollectiveTitle = ReadTextOrNull(r, 4),
+                        CategoryTitle = ReadTextOrNull(r, 5),
+                        SourceName = ReadTextOrNull(r, 6),
+                    };
+                }
+            }
+            if (metadata == null) return null;
+
+            if (TableExists(conn, "book_author") && TableExists(conn, "author"))
+                metadata.Authors = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataAuthors, bookId);
+            if (TableExists(conn, "book_pub_place") && TableExists(conn, "pub_place"))
+                metadata.PublicationPlaces = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataPublicationPlaces, bookId);
+            if (TableExists(conn, "book_pub_date") && TableExists(conn, "pub_date"))
+                metadata.PublicationDates = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataPublicationDates, bookId);
+            if (TableExists(conn, "book_topic") && TableExists(conn, "topic"))
+                metadata.Topics = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataTopics, bookId);
+
+            // The licence lives in a different place in each library schema.
+            if (TableExists(conn, "book_version") && ColumnExists(conn, "book_version", "license"))
+            {
+                metadata.Licenses = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataLicensesFromVersions, bookId);
+                metadata.EditionSources = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataEditionSourcesFromVersions, bookId);
+            }
+            else if (TableExists(conn, "book_edition") && TableExists(conn, "license") && TableExists(conn, "edition"))
+            {
+                metadata.Licenses = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataLicensesFromEditions, bookId);
+                metadata.EditionSources = ReadBookTextList(conn, SeforimDbSqlStrings.GetBookMetadataEditionSourcesFromEditions, bookId);
+            }
+
+            return metadata;
+        }
+
+        /// <summary>A trimmed text column, or null when it is NULL or blank.</summary>
+        private static string? ReadTextOrNull(SqliteDataReader reader, int ordinal)
+        {
+            if (reader.IsDBNull(ordinal)) return null;
+            var text = Convert.ToString(reader.GetValue(ordinal))?.Trim();
+            return string.IsNullOrEmpty(text) ? null : text;
+        }
+
+        /// <summary>
+        /// Runs a one-column, @bookId-parameterised query and returns its non-blank values,
+        /// de-duplicated in reading order.
+        /// </summary>
+        private static List<string> ReadBookTextList(SqliteConnection conn, string sql, int bookId)
+        {
+            var list = new List<string>();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@bookId", bookId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var text = ReadTextOrNull(r, 0);
+                if (text != null && !list.Contains(text)) list.Add(text);
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// The library build number, for stamping a report. Empty on a library with no
+        /// schema_meta table — nothing depends on the number, so there is nothing to fail.
+        /// </summary>
+        public List<SchemaMetaValueRow> GetLibraryDbVersion()
+        {
+            var list = new List<SchemaMetaValueRow>();
+            using var conn = Open();
+
+            if (!TableExists(conn, "schema_meta")) return list;
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = SeforimDbSqlStrings.GetLibraryDbVersion;
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(new SchemaMetaValueRow { Value = r.IsDBNull(0) ? "" : r.GetString(0) });
+            return list;
+        }
+
+        /// <summary>One line's canonical reference and stored text, so a reported mistake can be
+        /// checked against what the library actually holds.</summary>
+        public List<LineRefRow> GetLineRefAndContent(int bookId, int lineIndex)
+        {
+            var list = new List<LineRefRow>();
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            using var codec = CodecFor(conn);
+            cmd.CommandText = SeforimDbSqlStrings.GetLineRefAndContent(SchemaOf(conn));
+            cmd.Parameters.AddWithValue("@bookId", bookId);
+            cmd.Parameters.AddWithValue("@lineIndex", lineIndex);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new LineRefRow
+                {
+                    Id = r.GetInt32(0),
+                    LineIndex = r.IsDBNull(1) ? 0 : r.GetInt32(1),
+                    HeRef = r.IsDBNull(2) ? null : r.GetString(2),
+                    Content = codec.DecodeColumnOrEmpty(r, 3),
+                });
+            }
             return list;
         }
 

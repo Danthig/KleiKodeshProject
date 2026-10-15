@@ -11,11 +11,22 @@ import { useFullTextSearchPreview } from './useFullTextSearchPreview'
 import FullTextSearchResultPreview from './FullTextSearchResultPreview.vue'
 import BookViewAbbrevTooltip from '@/features/book-view/lines/BookViewAbbrevTooltip.vue'
 import { useBookViewAbbrevTooltip } from '@/features/book-view/lines/useBookViewAbbrevTooltip'
+import { useVirtualizedTextSelection } from '@/composables/useVirtualizedTextSelection'
+import { wrapRtlHtml, htmlToPlainText } from '@/composables/useLineCopy'
+import { buildSelectedResultsHtml, resultReference } from './fullTextSearchResultsCopy'
 import type { FullTextSearchResult, SearchFailReason } from './fullTextSearchTypes'
+import { teamimFontStyle } from '@/utils/teamimFont'
 
 const props = defineProps<{
   results: FullTextSearchResult[]
   totalResults: number
+  /**
+   * Bumped whenever the results array is REBUILT rather than appended to — a new
+   * search, a sort change, or a book/@-token filter change. Row indexes address
+   * different results after any of those, which the selection pins must know about;
+   * see useFullTextSearchFilters.filteredGeneration.
+   */
+  resultsGeneration: number
   searchQuery: string
   isSearching: boolean
   hasSearched: boolean
@@ -46,8 +57,8 @@ const { abbrevTooltip } = useBookViewAbbrevTooltip(scrollEl, {
 })
 
 // Right-click copy and the clean-text toggle are served by the app-wide fallback
-// menu (GlobalContextMenu), which also honors the toggle on Ctrl+C — no
-// FTS-specific menu or scoped copy interceptor is needed here.
+// menu (GlobalContextMenu). The PAYLOAD, though, is built here: see
+// buildSelectedResultsCopyHtml for why the DOM selection is not enough.
 
 const fontPx = computed(() => {
   const zoomFactor = (props.zoom ?? 100) / 100
@@ -65,6 +76,29 @@ const RENDER_PAGE = 200
 const renderCount = ref(RENDER_PAGE)
 const renderLimit = computed(() => Math.min(props.results.length, renderCount.value))
 
+// Keeps the rows holding a selection's two ends mounted however far they scroll
+// away. Without it, dragging a selection down the results list unmounts the row it
+// started in, and the browser re-homes the anchor onto whatever row now occupies
+// that position — so the selection silently comes to mean something else.
+const { rangeExtractor: selectionRangeExtractor, selectedRowIndexRange } = useVirtualizedTextSelection(
+  scrollEl,
+  // The rebuild generation, which is the only thing that tracks this exactly.
+  //
+  // Deliberately NOT the result count or the render window: both grow WHILE the user
+  // drags — results stream in, and renderCount widens as the viewport nears the end of
+  // the render window (see the watch on getVirtualItems below) — so either one changed
+  // the identity mid-drag and cleared the pins, putting the bug straight back.
+  // Verified live: the anchor row was dropped from the rendered range and Chromium
+  // re-homed the anchor onto a different row.
+  //
+  // Also not the leading result's id, which was the first fix attempted here and is
+  // NOT sufficient: a filter change rebuilds the whole list, and unchecking a book
+  // that owns no early row leaves results[0] untouched while re-indexing everything
+  // behind it. The generation counter is bumped by exactly the rebuilds that
+  // re-address the rows, and by nothing else.
+  () => props.resultsGeneration,
+)
+
 const virtualizer = useVirtualizer(
   computed(() => ({
     count: renderLimit.value,
@@ -72,6 +106,7 @@ const virtualizer = useVirtualizer(
     estimateSize: () => 80,
     overscan: 8,
     getItemKey: (index) => props.results[index]?.lineId ?? index,
+    rangeExtractor: selectionRangeExtractor.value,
   })),
 )
 
@@ -107,8 +142,96 @@ watch(
   () => {
     clearPreviews()
     renderCount.value = RENDER_PAGE // new search → collapse the window to the first page
+    // A new query means a new result list: kill any pending/armed restore so the previous
+    // search's saved index can't be applied to it, and start at the top. The parent clears
+    // its saved position too, but this watcher is what catches an in-flight retry loop.
+    // ...unless the parent explicitly armed a target for THIS navigation (Back/Forward onto
+    // a search row). That is a restore, not a fresh search, and the two watchers can fire in
+    // either order -- so an arm in the same tick wins over this blanket cancel.
+    const armedAt = lastArmTick
+    nextTick(() => {
+      if (lastArmTick !== armedAt) return // parent armed a target -- leave it alone
+      cancelRestore()
+      scrollEl.value?.scrollTo({ top: 0 })
+    })
   },
 )
+
+/**
+ * The clipboard payload for the current selection, built from the RESULT MODEL
+ * rather than the DOM.
+ *
+ * A selection dragged over many results has only a screenful of them in the DOM, so
+ * serializing the live Range would silently drop the rest — the same virtualization
+ * gap the pinned rows fix for the selection itself. Copying a range of results is a
+ * normal thing to want (collecting every hit for a phrase), so the payload spans
+ * every selected result and gives each one its reference.
+ *
+ * Returns null when nothing is selected here, which leaves the copy event alone for
+ * GlobalContextMenu or the browser to handle.
+ */
+function buildSelectedResultsCopyHtml(): string | null {
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null
+  const range = selection.getRangeAt(0)
+  if (!scrollEl.value?.contains(range.commonAncestorContainer)) return null
+
+  // An open preview replaces the row's snippet with up to 120 lines of the real book
+  // text, nested INSIDE the row — so a selection in there resolves to the row like any
+  // other, and rebuilding from the model would hand back the short clamped snippet
+  // instead of the paragraphs the user highlighted. That text is not even in the
+  // snippet. Leave the preview's own selection to the native copy, the same way the
+  // abbreviation tooltip is set up to ignore it.
+  const container =
+    range.commonAncestorContainer instanceof Element
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement
+  if (container?.closest('.preview-box')) return null
+
+  // Likewise when the selection merely CROSSES an open preview: any result whose
+  // preview is open is showing text the snippet does not contain, so a model rebuild
+  // would quietly substitute different content for it. Rare enough (a preview has to
+  // be open inside the selected span) that falling back to the native copy — which at
+  // least reflects the DOM — beats substituting text the user never saw.
+  const rowIndexRange = selectedRowIndexRange()
+  if (rowIndexRange) {
+    for (let rowIndex = rowIndexRange.firstRowIndex; rowIndex <= rowIndexRange.lastRowIndex; rowIndex++) {
+      const result = props.results[rowIndex]
+      if (result && previewOf(result)) return null
+    }
+  }
+
+  return buildSelectedResultsHtml(
+    props.results,
+    rowIndexRange,
+    renderSnippet,
+    settingsStore.copyCleanText,
+  )
+}
+
+// Serves Ctrl+C and the context menu's copy — both fire a native copy event on the
+// scroller — plus a drag of the selection into Word. An element listener rather than
+// useScopedCopy because that composable also takes a select-all flag and a lines
+// getter this list has no equivalent of; the two event handlers are the whole of
+// what it would give us here.
+//
+// Writing a payload preventDefaults the event, which is also what stands
+// GlobalContextMenu's document-level fallback down (it returns early on
+// event.defaultPrevented) so the two cannot both write to the clipboard.
+useEventListener(scrollEl, 'copy', (event: ClipboardEvent) => {
+  const html = buildSelectedResultsCopyHtml()
+  if (html === null) return
+  event.clipboardData?.setData('text/html', wrapRtlHtml(html))
+  event.clipboardData?.setData('text/plain', htmlToPlainText(html))
+  event.preventDefault()
+})
+
+useEventListener(scrollEl, 'dragstart', (event: DragEvent) => {
+  const html = buildSelectedResultsCopyHtml()
+  if (html === null) return
+  event.dataTransfer?.setData('text/html', wrapRtlHtml(html))
+  event.dataTransfer?.setData('text/plain', htmlToPlainText(html))
+})
 
 // Open previews' component instances, keyed by lineId — the header recenter button
 // lives outside the preview component, so it reaches the scroll through this map.
@@ -122,8 +245,9 @@ function recenterPreview(result: FullTextSearchResult) {
 }
 
 function resultTitle(result: FullTextSearchResult): string {
-  const base = result.tocText ? `${result.bookTitle} › ${result.tocText}` : result.bookTitle
-  return withNewTabHint(base)
+  // Shares resultReference with the copy path so a citation reads the same whether it
+  // is hovered or pasted.
+  return withNewTabHint(resultReference(result))
 }
 
 function captureScrollPos() {
@@ -204,6 +328,16 @@ function restoreScrollPos(scrollIndex: number, scrollOffset: number) {
 // watch; the parent calls it after updating the target.
 let armRestore = () => {}
 
+// The inverse of armRestore: spends the latch so no restore can fire for the results that
+// are about to arrive. A NEW search must start at the top of its own list, but the restore
+// watcher lives for the component's lifetime and stays armed whenever nothing has been
+// restored yet in this session -- so without this it would happily apply the PREVIOUS
+// search's saved index to the new result set as it streams in.
+let cancelRestore = () => {}
+// Bumped every time the parent arms a restore target, so the new-search cancel above can tell
+// whether an explicit arm landed in the same tick and step aside for it.
+let lastArmTick = 0
+
 {
   // Restore scroll once the target row is actually reachable. This is the tricky case on
   // reload: results stream in over time (fresh re-search) or arrive as a partial cache
@@ -266,6 +400,7 @@ let armRestore = () => {}
     { flush: 'post', immediate: true },
   )
   armRestore = () => {
+    lastArmTick++
     generation++   // abandon any retry loop still running for the previous target
     restored = false
     // Do NOT attempt the restore synchronously here. The navigation that re-armed us also
@@ -282,6 +417,10 @@ let armRestore = () => {}
     // that: by then executeSearch has either emptied the list (watcher takes over) or the
     // navigation didn't re-search at all and the settled rows are the right ones.
     nextTick(() => { if (!restored) tryRestore() })
+  }
+  cancelRestore = () => {
+    generation++   // abandon any retry loop still running for the previous target
+    restored = true // spend the latch: the streaming results below belong to a NEW search
   }
 }
 
@@ -335,7 +474,12 @@ function scrollToBook(bookId: number) {
 
 function onScroll() {}
 
-defineExpose({ captureScrollPos, scrollToBook, armRestore: () => armRestore() })
+defineExpose({
+  captureScrollPos,
+  scrollToBook,
+  armRestore: () => armRestore(),
+  cancelRestore: () => cancelRestore(),
+})
 </script>
 
 <template>
@@ -414,7 +558,7 @@ defineExpose({ captureScrollPos, scrollToBook, armRestore: () => armRestore() })
                 :reseed="() => reseedPreview(results[vRow.index]!)"
               />
               <!-- eslint-disable-next-line vue/no-v-html -->
-              <div v-else class="snippet" v-html="renderSnippet(results[vRow.index]!.snippet)" />
+              <div v-else class="snippet" :style="teamimFontStyle(results[vRow.index]!.snippet)" v-html="renderSnippet(results[vRow.index]!.snippet)" />
             </div>
           </div>
         </div>

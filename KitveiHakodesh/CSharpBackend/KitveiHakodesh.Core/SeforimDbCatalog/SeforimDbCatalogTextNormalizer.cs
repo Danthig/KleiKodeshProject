@@ -27,7 +27,7 @@ public static class SeforimDbCatalogTextNormalizer
         ["שלחן"] = "שולחן",
     };
 
-    /// <summary>The abbreviation map (generated from Catalog/catalog_abbreviations.json).
+    /// <summary>The abbreviation map (hand-edited, in SeforimDbCatalogAbbreviations).
     /// Key = an abbreviation with EVERY QUOTE GLYPH STRIPPED (ט"ז is keyed as טז); value =
     /// alternatives, each an ordered word list that is AND-matched. More than one
     /// alternative = an ambiguous abbreviation that OR-expands (only used on the QUERY
@@ -40,8 +40,8 @@ public static class SeforimDbCatalogTextNormalizer
 
     /// <summary>Every quote-ish glyph an abbreviation may be written with: ASCII quote and
     /// apostrophe, Hebrew gershayim/geresh, and the curly forms. Stripped from both the
-    /// map keys (at generation time) and every lookup candidate, so a token matches
-    /// regardless of which mark — if any — was typed.</summary>
+    /// map keys (by hand, enforced by SeforimDbCatalogAbbreviationsCheck) and every lookup
+    /// candidate, so a token matches regardless of which mark — if any — was typed.</summary>
     private static bool IsQuoteGlyph(char c) =>
         c is '"' or '\'' or '״' or '׳' or '“' or '”' or '‘' or '’';
 
@@ -60,8 +60,57 @@ public static class SeforimDbCatalogTextNormalizer
         return sb.ToString();
     }
 
+    /// <summary>
+    /// The abbreviation key this word carries IF it is written as a quoted acronym, else null.
+    ///
+    /// The quote matters because a few acronyms are spelled identically to an ordinary Hebrew
+    /// word once the quote is gone. Those keys are necessarily identity entries in the map
+    /// (they expand to themselves), so after normalization an author acronym and a common noun
+    /// are the SAME token and nothing downstream can tell them apart. The quote — stripped by
+    /// the pipeline before matching — is the only thing that separates them, so it is recovered
+    /// here, per key.
+    ///
+    /// The caller compares the query's keys against each HIT's own stored raw text at result
+    /// time: the stored strings keep their glyphs, only the indexed tokens were stripped, so no
+    /// index-side field is involved. See SeforimDbCatalogIndex.HitCarriesQuotedKey.
+    /// </summary>
+    public static string? GetQuotedAbbreviationKey(string word)
+    {
+        // Trim edge punctuation FIRST: a quote at the word boundary is quotation punctuation,
+        // not an acronym mark, and must not register — a common word wrapped in quotes in a
+        // title (or a phrase-quoted query) is not an acronym. Only a glyph INSIDE the trimmed
+        // word counts.
+        int a = 0, b = word.Length;
+        while (a < b && !char.IsLetterOrDigit(word[a])) a++;
+        while (b > a && !char.IsLetterOrDigit(word[b - 1])) b--;
+        if (b <= a) return null;
+
+        bool hasGlyph = false;
+        for (int i = a; i < b; i++) if (IsQuoteGlyph(word[i])) { hasGlyph = true; break; }
+        if (!hasGlyph) return null;
+
+        string candidate = StripQuoteGlyphs(word.Substring(a, b - a));
+        return Abbrev.ContainsKey(candidate) ? candidate : null;
+    }
+
+    /// <summary>Every distinct quoted-acronym key in <paramref name="text"/> (see
+    /// <see cref="GetQuotedAbbreviationKey"/>), or null when there are none — the common case,
+    /// which then allocates nothing.</summary>
+    public static HashSet<string>? GetQuotedAbbreviationKeys(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+
+        HashSet<string>? keys = null;
+        foreach (var word in text!.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var key = GetQuotedAbbreviationKey(word);
+            if (key != null) (keys ?? (keys = new HashSet<string>(StringComparer.Ordinal))).Add(key);
+        }
+        return keys;
+    }
+
     /// <summary>Largest key word-count in <see cref="Abbrev"/> — the lookahead window
-    /// for greedy multi-word matching. Computed once from the generated map.</summary>
+    /// for greedy multi-word matching. Computed once from the map.</summary>
     private static readonly int MaxKeyWords = ComputeMaxKeyWords();
 
     /// <summary>The abbreviation map as (key, alternatives) pairs — exposed for

@@ -28,8 +28,29 @@ namespace KleiKodesh.Ribbon
 
         public string GetCustomUI(string ribbonID)
         {
-            return GetResourceText("KleiKodesh.Ribbon.KeliKodeshRibbon.xml");
+            string xml = GetResourceText("KleiKodesh.Ribbon.KeliKodeshRibbon.xml");
+            if (xml == null)
+                return null;
+
+            // The context menus are generated rather than authored: the same four
+            // items repeat across every context menu Word might raise, which is far
+            // too much near-identical XML to maintain by hand. See
+            // ContextMenuXmlBuilder.
+            //
+            // Replace would return the document unchanged if the placeholder were
+            // ever renamed or reformatted away, and the add-in would come up with a
+            // working ribbon and silently no context menus at all. Assert instead:
+            // this is a build-time mistake, so it should be loud in dev, not a
+            // mystery in the field.
+            if (xml.IndexOf(ContextMenusPlaceholder, StringComparison.Ordinal) < 0)
+                throw new InvalidOperationException(
+                    "KeliKodeshRibbon.xml is missing the " + ContextMenusPlaceholder +
+                    " placeholder, so no context menus would be registered.");
+
+            return xml.Replace(ContextMenusPlaceholder, ContextMenuXmlBuilder.Build());
         }
+
+        private const string ContextMenusPlaceholder = "<!--CONTEXT_MENUS-->";
 
         #endregion
 
@@ -178,9 +199,19 @@ namespace KleiKodesh.Ribbon
         // right-click, so this reflects the current selection every time.
         public bool getContextVisible(Office.IRibbonControl control)
         {
+            if (!IsKitveiHakodeshEnabled())
+                return false;
             try { return FindSelectionHostLink() != null; }
             catch { return false; }
         }
+
+        // Context-menu items belong to the Kitvei Hakodesh feature: hide them when
+        // the user unchecks it in the settings pane.
+        public bool getKitveiHakodeshContextVisible(Office.IRibbonControl control) =>
+            IsKitveiHakodeshEnabled();
+
+        private static bool IsKitveiHakodeshEnabled() =>
+            SettingsManager.GetBool("Ribbon", "KitveiHakodesh_Visible", true);
 
         /// <summary>
         /// Returns the first link among the hyperlinks overlapping the current selection

@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import type { NavLocation } from './navLocation'
+import { locationKey, type NavLocation } from './navLocation'
 
 /**
  * Per-tab Back/Forward stacks — the third tab collection, and the only one that is
@@ -113,6 +113,54 @@ export function currentLocation(tabId: string): NavLocation | null {
   const history = get(tabId)
   if (!history) return null
   return history.entries[history.cursor] ?? null
+}
+
+/**
+ * Removes the current entry from the stack and steps back to the previous one.
+ * Returns the location to navigate to, or null if there is no previous entry
+ * (i.e. the current entry is the only one — caller should go home instead).
+ *
+ * This is the "close current page" operation for environments without a native
+ * tab strip (VSTO, dev): Ctrl+W removes this place from history rather than
+ * merely moving the cursor past it.
+ */
+export function popCurrentAndGoBack(tabId: string): NavLocation | null {
+  const history = get(tabId)
+  if (!history || history.cursor === 0) return null
+
+  // Remove EVERY frame for this document, not just the one under the cursor.
+  // pushLocation does not dedupe, so a book visited twice holds two frames; splicing
+  // only the cursor frame left the older one behind, and the next Back — or the next
+  // close, which steps the cursor onto it — showed the book the reader had just
+  // closed. Navigating away from that resurrected frame then re-recorded it into
+  // recents through applyTabPatch, so the "closed" book came back for good.
+  const closedKey = locationKey(history.entries[history.cursor]!)
+  const kept: NavLocation[] = []
+  let cursor = -1
+  for (const [index, entry] of history.entries.entries()) {
+    if (locationKey(entry) === closedKey) continue
+    kept.push(entry)
+    // The frame to land on is the newest survivor at or before the cursor.
+    if (index < history.cursor) cursor = kept.length - 1
+  }
+
+  history.entries = kept
+  history.cursor = cursor
+  bump()
+  return cursor === -1 ? null : (history.entries[cursor] ?? null)
+}
+
+/**
+ * Clears ALL history entries for a tab, leaving an empty stack.
+ * Used by Ctrl+X ("close all") in environments without a native tab strip.
+ * The caller is responsible for navigating home afterwards.
+ */
+export function clearHistory(tabId: string): void {
+  const history = get(tabId)
+  if (!history) return
+  history.entries = []
+  history.cursor = -1
+  bump()
 }
 
 /** Drops a tab's history — called when the tab closes. */

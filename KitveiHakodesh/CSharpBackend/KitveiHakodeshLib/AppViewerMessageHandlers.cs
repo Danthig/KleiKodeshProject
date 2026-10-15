@@ -1,8 +1,8 @@
-using KitveiHakodeshLib.Db;
 using KitveiHakodeshLib.Diagnostics;
 using KitveiHakodeshLib.Dictionary;
 using KitveiHakodeshLib.HebrewBooks;
-using KitveiHakodeshLib.Helpers;
+using KitveiHakodesh.Core.LocalFiles;
+using KitveiHakodesh.Core.Settings;
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.Text.Json;
@@ -39,21 +39,21 @@ namespace KitveiHakodeshLib
                 {
                     var root = doc.RootElement;
                     id = root.GetProperty("id").GetString();
-                    string action = root.TryGetProperty("action", out var a)
-                        ? a.GetString()
-                        : root.TryGetProperty("sql", out _) ? "sql" : null;
+                    // No implicit "sql" fallback any more: a message without an action used to
+                    // mean the raw-SQL passthrough, which is retired.
+                    string action = root.TryGetProperty("action", out var a) ? a.GetString() : null;
 
+                    // No data op is answered here. Seforim and dictionary queries go from the
+                    // page straight to the KitveiHakodesh service through ServiceRpcRelay; this
+                    // switch is for what only the host process can do (window, Word, files, chrome).
                     switch (action)
                     {
-                        case "sql": await _db.HandleSql(root, id); break;
-                        case "dict-sql": await HandleDictSql(root, id); break;
-                        case "setDbPath": _db.HandleSetDbPath(root, id); break;
-                        case "pickDbPath": _db.HandlePickDbPath(id, this); break;
-                        case "clearDbPath": _db.HandleClearDbPath(id); break;
-                        case "clearHbLocalFolder": _db.HandleClearHbLocalFolder(id); break;
-                        case "getTurnOffUpdates": _db.HandleGetTurnOffUpdates(id); break;
-                        case "setTurnOffUpdates": _db.HandleSetTurnOffUpdates(root, id); break;
-                        case "resetSettings": _db.HandleResetSettings(id); break;
+                        // The dialog only: the chosen path goes to the service from the page.
+                        case "pickDbPath": HandlePickDbPathDialog(id); break;
+                        case "resetSettings": HandleResetSettings(id); break;
+                        // The page's "try again" after the service was unavailable: allow one more
+                        // install / repair prompt and bring the service up.
+                        case "retryService": await HandleRetryService(id); break;
                         // Replies before reloading on purpose, unlike DeleteFtsIndex: the caller
                         // cannot meaningfully await a navigation that destroys the page making the
                         // call, so the reply exists only to settle the promise. Both frontend
@@ -69,43 +69,19 @@ namespace KitveiHakodeshLib
                         case "pickFolder": _localFile.HandlePickFolder(id, this); break;
                         case "restoreLocalFile": await _localFile.HandleRestoreLocalFile(root, id); break;
                         case "openInDefaultApp": _localFile.HandleOpenInDefaultApp(root, id); break;
+                        case "openUrlInSystemBrowser": HandleOpenUrlInSystemBrowser(root, id); break;
                         case "readTxtFileContent": await _localFile.HandleReadTxtFileContent(root, id); break;
                         case "disposeLocalFileHost": _localFile.HandleDisposeLocalFileHost(root, id); break;
                         case "appReady": HandleAppReady(id); break;
-                        case "restoreHbPdf": _hb.HandleRestoreHbPdf(root, id); break;
-                        case "triggerHbDownload": _hb.HandleTriggerHbDownload(root, id); break;
                         case "triggerHbSaveAs": _hb.HandleTriggerHbSaveAs(root, id); break;
-                        case "deleteHbLocalFile": _hb.HandleDeleteHbLocalFile(root, id); break;
-                        case "checkHbLocalFiles": _hb.HandleCheckHbLocalFiles(root, id); break;
                         case "revealHbLocalFile": _hb.HandleRevealHbLocalFile(root, id); break;
-                        case "hbDownloadProgress": _hb.HandleHbDownloadProgress(root, id); break;
-                        case "cancelHbDownload": _hb.HandleCancelHbDownload(root, id); break;
-                        case "hbSearch": HandleHebrewBooksSearch(root, id); break;
-                        case "GetFtsIndexingProgress": _search.HandleGetProgress(id); break;
-                        case "FtsSearchStart": _search.HandleSearchStart(root, id); break;
-                        case "FtsSearchCancel": _search.HandleSearchCancel(root, id); break;
-                        case "DeleteFtsIndex": _search.HandleDeleteIndex(id); break;
-                        case "ResetFtsIndex": _search.HandleResetFtsIndex(id); break;
                         case "TogglePopOut": HandleTogglePopOut(id); break;
                         case "toggleFullscreen": HandleToggleFullscreen(id); break;
                         case "getWordSynonyms": HandleGetWordSynonyms(root, id); break;
-                        case "getFonts": await HandleGetFonts(id); break;
                         case "getDiagnostics": HandleGetDiagnostics(id); break;
-                        case "fileSystemSearchWarmup": _fileSystemSearch.HandleWarmup(id); break;
-                        case "fileSystemSearch": _fileSystemSearch.HandleSearch(root, id); break;
-                        case "ResetDocumentLocatorIndex": _fileSystemSearch.HandleReindex(id); break;
-                        // Catalog TOC (Lucene) search. Hosted used to have no equivalent — the
-                        // frontend fell back to in-memory heuristics here while dev used the
-                        // service's index — so these three run the SAME engine, from source
-                        // shared with KitveiHakodeshService (see the csproj's linked Catalog files).
-                        case "catalogTocSearch": _catalogToc.HandleSearch(root, id); break;
-                        case "catalogTocStatus": _catalogToc.HandleStatus(id); break;
-                        case "catalogTocResetIndex": _catalogToc.HandleResetIndex(id); break;
-                        case "openExcludedFoldersManager": _fileSystemSearch.HandleOpenExcludedFoldersManager(id); break;
-                        case "userSettingsQuery": await _userSettings.HandleQuery(root, id); break;
-                        case "userSettingsExecute": await _userSettings.HandleExecute(root, id); break;
-                        case "exportToWord": HandleExportToWord(root, id); break;
-                        case "pasteIntoWord": HandlePasteIntoWord(root, id); break;
+                        case "getFonts": await HandleGetFonts(id); break;
+                        case "exportToWord": await HandleExportToWord(root, id); break;
+                        case "pasteIntoWord": await HandlePasteIntoWord(root, id); break;
                         case "copyImageToClipboard": HandleCopyImageToClipboard(root, id); break;
                         case "setTheme": HandleSetTheme(root, id); break;
                         case "tabsChanged": HandleTabsChanged(root, id); break;
@@ -119,7 +95,7 @@ namespace KitveiHakodeshLib
             {
                 // Full exception (type + message + stack + inner exceptions), not just
                 // ex.Message — this is the only place a handler that throws before its
-                // own try/catch (e.g. SaveDbPath inside setDbPath) gets reported, and
+                // own try/catch gets reported, and
                 // the truncated form made those failures undiagnosable from the field.
                 if (id != null) _bridge.Reply(id, new { error = ex.ToString() });
             }
@@ -130,40 +106,6 @@ namespace KitveiHakodeshLib
             string word = root.TryGetProperty("word", out var w) ? w.GetString() : null;
             var groups = WordThesaurusProvider.GetSynonyms(word);
             _bridge.Reply(id, new { groups });
-        }
-
-        private async Task HandleDictSql(JsonElement root, string id)
-        {
-            if (!_dictionary.IsReady)
-            {
-                _bridge.Reply(id, new { error = "Dictionary database not available" });
-                return;
-            }
-            string sql = root.GetProperty("sql").GetString();
-            try
-            {
-                // Off-UI continuation — see DbHandler.HandleSql.
-                var rows = await Task.Run(() => _dictionary.Query(sql, DbHandler.ParseParamsStatic(root))).ConfigureAwait(false);
-                _bridge.Reply(id, new { rows });
-            }
-            catch (Exception ex) { _bridge.Reply(id, new { error = ex.Message }); }
-        }
-
-        private async Task HandleWikiDictSql(JsonElement root, string id)
-        {
-            if (!_dictionary.IsWikiReady)
-            {
-                _bridge.Reply(id, new { error = "Wikidict database not available" });
-                return;
-            }
-            string sql = root.GetProperty("sql").GetString();
-            try
-            {
-                // Off-UI continuation — see DbHandler.HandleSql.
-                var rows = await Task.Run(() => _dictionary.QueryWiki(sql, DbHandler.ParseParamsStatic(root))).ConfigureAwait(false);
-                _bridge.Reply(id, new { rows });
-            }
-            catch (Exception ex) { _bridge.Reply(id, new { error = ex.Message }); }
         }
 
         private void HandleTogglePopOut(string id)
@@ -235,13 +177,88 @@ namespace KitveiHakodeshLib
             }
         }
 
-        private async Task HandleGetFonts(string id)
+        private async Task HandleRetryService(string id)
         {
-            // WebMessageReceived fires on the UI thread, and a cold enumeration walks the
-            // cmap of every system typeface — around a second on a font-heavy machine.
-            // Task.Run keeps the window responsive; Reply marshals itself back.
-            var fonts = await Task.Run(() => FontsProvider.GetHebrewFonts());
-            _bridge.Reply(id, new { fonts });
+            KitveiHakodeshLib.Service.KitveiHakodeshServiceLauncher.AllowAnotherRepairAttempt();
+            try
+            {
+                await Task.Run(() => _serviceLauncher.EnsureRunningAsync(System.Threading.CancellationToken.None));
+                _bridge.Reply(id, new { ok = true });
+            }
+            catch (KitveiHakodeshLib.Service.KitveiHakodeshServiceUnavailableException ex)
+            {
+                _bridge.Reply(id, new { ok = false, reason = ex.Reason.ToString(), detail = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// The native open-file dialog for a seforim database. Only the dialog: the page hands
+        /// the chosen path to the service (setSeforimDbPath), which validates, persists and
+        /// restarts. An installed service may have no desktop to show a dialog on, which is
+        /// why this one stays with the window.
+        /// </summary>
+        private void HandlePickDbPathDialog(string id)
+        {
+            IntPtr ownerHandle = Handle;
+            _ = PickDbPathAsync(id, ownerHandle);
+        }
+
+        private async Task PickDbPathAsync(string id, IntPtr ownerHandle)
+        {
+            try
+            {
+                string path = await NativeFilePicker.PickAsync(
+                    NativeFilePicker.DatabaseFilter, NativeFilePicker.DatabaseDialogTitle, owner: ownerHandle);
+                _bridge.Reply(id, path == null ? (object)new { cancelled = true } : new { path });
+            }
+            catch (Exception ex)
+            {
+                _bridge.Reply(id, new { error = ex.ToString() });
+            }
+        }
+
+        /// <summary>
+        /// Wipes the host's whole KitveiHakodesh settings subtree (window geometry, pop-out
+        /// bounds, the theme mirror). The data settings are reset through the service by the
+        /// page before it calls this. Clearing the persisted dark mode means the app comes back
+        /// light, so the title bar goes light at once to match the theme Vue applies after the
+        /// reload that follows.
+        /// </summary>
+        private void HandleResetSettings(string id)
+        {
+            try { Microsoft.VisualBasic.Interaction.DeleteSetting("KitveiHakodesh"); } catch { }
+            if (InvokeRequired)
+                Invoke(new Action(() => ApplyTitleBarTheme(false)));
+            else
+                ApplyTitleBarTheme(false);
+            ApplySplashTheme(false);
+            _bridge.Reply(id, new { });
+        }
+
+        /// <summary>
+        /// Opens a web address in the user's default browser. Only absolute http/https URLs are
+        /// accepted - anything else (file:, javascript:, a bare path) is refused rather than
+        /// handed to the shell, which would happily run it.
+        /// </summary>
+        private void HandleOpenUrlInSystemBrowser(JsonElement root, string id)
+        {
+            try
+            {
+                string url = root.TryGetProperty("url", out var u) ? u.GetString() : null;
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                    (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                {
+                    _bridge.Reply(id, new { error = "invalid url" });
+                    return;
+                }
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = uri.AbsoluteUri,
+                    UseShellExecute = true,
+                });
+                _bridge.Reply(id, new { ok = true });
+            }
+            catch (Exception ex) { _bridge.Reply(id, new { error = ex.Message }); }
         }
 
         private void HandleAppReady(string id)
@@ -268,24 +285,40 @@ namespace KitveiHakodeshLib
             }
         }
 
+        /// <summary>The Hebrew-capable font families on THIS machine, enumerated in this process
+        /// through DirectWrite (Common/HebrewFonts, linked from Core): the picker needs no service
+        /// round trip for something the window already knows. A cold enumeration walks the cmap of
+        /// every typeface, so it runs off the UI thread; Reply marshals itself back.</summary>
+        private async Task HandleGetFonts(string id)
+        {
+            var fonts = await Task.Run(() => KitveiHakodesh.Core.Common.HebrewFonts.GetHebrewFonts());
+            _bridge.Reply(id, new { fonts });
+        }
+
         private void HandleGetDiagnostics(string id)
         {
             var report = EnvironmentDiagnostics.Collect();
             _bridge.Reply(id, new { diagnostics = report });
         }
 
-        private void HandleExportToWord(JsonElement root, string id)
+        // Both Word actions AWAIT the result and report it. They used to reply ok=true
+        // immediately and drop the task on the floor, so every failure inside Word automation
+        // ended at a Debug.WriteLine — a no-op in Release. A user whose paste did nothing had
+        // no way to find out why, and neither did anyone reading a bug report about it.
+        // WordExporter never throws: it returns null on success or a message to show.
+
+        private async Task HandleExportToWord(JsonElement root, string id)
         {
-            _bridge.Reply(id, new { ok = true });
             string html = root.TryGetProperty("html", out var h) ? h.GetString() ?? "" : "";
             string title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
-            _ = WordExporter.ExportAsync(html, title);
+            string error = await WordExporter.ExportAsync(html, title);
+            _bridge.Reply(id, error == null ? (object)new { ok = true } : new { error });
         }
 
-        private void HandlePasteIntoWord(JsonElement root, string id)
+        private async Task HandlePasteIntoWord(JsonElement root, string id)
         {
-            _bridge.Reply(id, new { ok = true });
-            _ = WordExporter.PasteAtCursorAsync();
+            string error = await WordExporter.PasteAtCursorAsync();
+            _bridge.Reply(id, error == null ? (object)new { ok = true } : new { error });
         }
 
         /// <summary>
@@ -345,28 +378,5 @@ namespace KitveiHakodeshLib
             return ok;
         }
 
-        private void HandleHebrewBooksSearch(JsonElement root, string id)
-        {
-            if (!_hebrewBooksDb.IsInitialized)
-            {
-                _bridge.Reply(id, new { error = "Hebrew Books database not available" });
-                return;
-            }
-            string query = root.TryGetProperty("query", out var q) ? (q.GetString() ?? "") : "";
-            string localFolder = root.TryGetProperty("localFolder", out var lf) ? (lf.GetString() ?? "") : "";
-            int limit = root.TryGetProperty("limit", out var lim) && lim.TryGetInt32(out int limVal)
-                ? limVal
-                : HebrewBooksDb.DefaultSearchResultLimit;
-            if (string.IsNullOrWhiteSpace(localFolder)) localFolder = KitveiHakodeshLib.Settings.AppSettings.LoadHbLocalFolder();
-            try
-            {
-                var results = _hebrewBooksDb.Search(query, localFolder, limit);
-                _bridge.Reply(id, new { books = results });
-            }
-            catch (Exception ex)
-            {
-                _bridge.Reply(id, new { error = ex.Message });
-            }
-        }
     }
 }

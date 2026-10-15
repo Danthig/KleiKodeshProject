@@ -15,7 +15,6 @@
 //
 // Usage: dotnet run -c Release [-- --db <seforim.db>] [--books 300] [--entries 3] [--rebuild]
 using System.Diagnostics;
-using KitveiHakodeshService.Catalog;
 using KitveiHakodeshService.Tests;
 using Microsoft.Data.Sqlite;
 
@@ -49,10 +48,24 @@ for (int i = 0; i < args.Length; i++)
     }
 }
 
+// The abbreviation table's two invariants, checked on EVERY run and before every mode:
+// it is pure data, needs no database, and both failure modes are silent at runtime (an
+// entry that can never match, or one that shadows another). A code generator used to
+// enforce these at build time; the table is hand-edited now, so this is the guard.
+var abbrevProblems = KitveiHakodesh.Core.SeforimDbCatalog.SeforimDbCatalogAbbreviationsCheck.Verify();
+if (abbrevProblems.Count > 0)
+{
+    Console.Error.WriteLine($"FAIL  abbreviation map: {abbrevProblems.Count} problem(s)");
+    foreach (var problem in abbrevProblems) Console.Error.WriteLine("  " + problem);
+    return 3;
+}
+
 if (watcherMode)
     return WatcherE2E.Run() == 0 ? 0 : 1;
 if (variantMode)
-    return VariantVerify.Run();
+    // Normalised to 0/1 like the line above: Run() returns a failure COUNT, and an
+    // unnormalised 3 failures would be indistinguishable from the abbreviation-map exit.
+    return VariantVerify.Run() == 0 ? 0 : 1;
 
 dbPath ??= Environment.GetEnvironmentVariable("DB_PATH");
 if (string.IsNullOrWhiteSpace(dbPath))
@@ -236,7 +249,7 @@ static string Describe(CatalogTocTextRules.QueryToken t) =>
     }
 }
 
-// ── 2a. Shared DbChangeStamp: prefix + missing-file behavior ─────────────────────
+// ── 2a. Shared DbFileFingerprint: prefix + missing-file behavior ─────────────────────
 
 {
     string scratch = Path.Combine(Path.GetTempPath(), $"dbstamp-{Environment.ProcessId}.tmp");
@@ -244,18 +257,18 @@ static string Describe(CatalogTocTextRules.QueryToken t) =>
     try
     {
         // Prefix is prepended and separates two format versions of the SAME file.
-        string s1 = KitveiHakodeshService.Common.DbChangeStamp.Compute(scratch, "fmtA");
-        string s2 = KitveiHakodeshService.Common.DbChangeStamp.Compute(scratch, "fmtB");
-        if (!s1.StartsWith("fmtA|", StringComparison.Ordinal)) Fail("DbChangeStamp: prefix not prepended");
-        if (s1 == s2) Fail("DbChangeStamp: different prefixes produced the same stamp (schema bump wouldn't rebuild)");
+        string s1 = KitveiHakodesh.Core.Common.DbFileFingerprint.Compute(scratch, "fmtA");
+        string s2 = KitveiHakodesh.Core.Common.DbFileFingerprint.Compute(scratch, "fmtB");
+        if (!s1.StartsWith("fmtA|", StringComparison.Ordinal)) Fail("DbFileFingerprint: prefix not prepended");
+        if (s1 == s2) Fail("DbFileFingerprint: different prefixes produced the same stamp (schema bump wouldn't rebuild)");
         // No prefix is allowed (empty head).
-        if (KitveiHakodeshService.Common.DbChangeStamp.Compute(scratch).StartsWith("|", StringComparison.Ordinal))
-            Fail("DbChangeStamp: empty prefix produced a leading separator");
+        if (KitveiHakodesh.Core.Common.DbFileFingerprint.Compute(scratch).StartsWith("|", StringComparison.Ordinal))
+            Fail("DbFileFingerprint: empty prefix produced a leading separator");
         // A missing file yields a stable, non-throwing 'missing' stamp.
-        string miss1 = KitveiHakodeshService.Common.DbChangeStamp.Compute(scratch + ".nope", "fmtA");
-        string miss2 = KitveiHakodeshService.Common.DbChangeStamp.Compute(scratch + ".nope", "fmtA");
-        if (miss1 != miss2 || !miss1.Contains("missing")) Fail("DbChangeStamp: missing-file stamp not stable/marked");
-        Console.WriteLine("DbChangeStamp check: OK (prefix separates formats, missing-file stable)");
+        string miss1 = KitveiHakodesh.Core.Common.DbFileFingerprint.Compute(scratch + ".nope", "fmtA");
+        string miss2 = KitveiHakodesh.Core.Common.DbFileFingerprint.Compute(scratch + ".nope", "fmtA");
+        if (miss1 != miss2 || !miss1.Contains("missing")) Fail("DbFileFingerprint: missing-file stamp not stable/marked");
+        Console.WriteLine("DbFileFingerprint check: OK (prefix separates formats, missing-file stable)");
     }
     finally { try { File.Delete(scratch); } catch { } }
 }

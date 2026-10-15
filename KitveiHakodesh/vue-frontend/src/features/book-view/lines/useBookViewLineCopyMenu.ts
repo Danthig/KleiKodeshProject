@@ -8,6 +8,7 @@ import type { useTabStore } from '@/stores/tabStore'
 import type { PaneNavigation } from '@/composables/usePaneNavigation'
 import BookViewAnnotationMenuRow from './BookViewAnnotationMenuRow.vue'
 import { cleanHebrewText } from '@/utils/hebrewTextCleaning'
+import { contentInAnnotationOffsetSpace } from './useBookViewLineRenderer'
 import { escapeHtml, htmlToText, serializeRangeBalanced } from '@/utils/htmlText'
 import { applyCopyExclusivity, type CopyExclusivityToggle } from '../copyFlagExclusivity'
 import { buildLineLink } from '@/utils/appDeepLink'
@@ -33,6 +34,12 @@ interface CopyMenuOptions {
   lines: () => LineItem[]
   isSelectAll: Ref<boolean>
   selectAllInContainer: () => void
+  /**
+   * The row index span of the current selection, from the pinned-row tracker. Lets a
+   * copy reach the selected lines that scrolled out of the DOM mid-selection; returns
+   * null when there is no selection in this pane.
+   */
+  selectedRowIndexRange: () => { firstRowIndex: number; lastRowIndex: number } | null
   bookTitle: string
   /** The open book — lets the מקור reference link back to the line it names. */
   bookId?: number
@@ -46,6 +53,12 @@ interface CopyMenuOptions {
   onClearHighlight?: () => void
   onAddNote?: () => void
   onCopyLineLink?: () => void
+  /**
+   * "דיווח על טעות בספר" — opens the report dialog. Takes nothing: the dialog's host
+   * owns the selection and the pressed line, since it is the one that has to keep
+   * them alive after the menu closes.
+   */
+  onReportError?: () => void
   /**
    * Warms the lazily-loaded notes and citations for a set of lines before an export
    * reads them. Awaited by the copy actions — see prepareAndCopy for why the
@@ -200,6 +213,60 @@ function extractSelection(
   return { joined, firstLineIndex }
 }
 
+/**
+ * The selected lines' HTML, INCLUDING the lines that scrolled out of the virtualized
+ * window mid-selection and are therefore not in the DOM at all.
+ *
+ * A selection can span thousands of lines while only a screenful is rendered. The two
+ * rows holding the selection's ends are always rendered — they are pinned there by
+ * useVirtualizedTextSelection — so those two keep their exact partial text from
+ * the DOM, and every line between them is taken whole from the model instead.
+ *
+ * Returns null when the selection is not one this can stitch (no pinned range, or the
+ * pinned rows are somehow not rendered), leaving the caller on its DOM-only path.
+ */
+function extractSelectionWithUnmountedLines(
+  scrollerEl: HTMLElement | null,
+  lines: LineItem[],
+  rowIndexRange: { firstRowIndex: number; lastRowIndex: number } | null,
+  perLineHtml: boolean,
+  renderLine?: (raw: string, lineIndex: number, lineId: number) => string,
+): SelectionResult | null {
+  if (!scrollerEl || !rowIndexRange) return null
+  const { firstRowIndex, lastRowIndex } = rowIndexRange
+  // A single-row selection is entirely inside one rendered line: nothing to stitch.
+  if (firstRowIndex >= lastRowIndex) return null
+
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
+  const range = selection.getRangeAt(0)
+
+  const firstRowElement = scrollerEl.querySelector(`[data-index="${firstRowIndex}"]`)
+  const lastRowElement = scrollerEl.querySelector(`[data-index="${lastRowIndex}"]`)
+  if (!firstRowElement || !lastRowElement) return null
+
+  // The selection's own partial text on each end line: the full range clipped to that
+  // one row. serializeRangeBalanced repairs tags the clip would otherwise leave open.
+  const firstRowRange = range.cloneRange()
+  firstRowRange.setEndAfter(firstRowElement)
+  const lastRowRange = range.cloneRange()
+  lastRowRange.setStartBefore(lastRowElement)
+
+  const htmlParts: string[] = [serializeRangeBalanced(firstRowRange, scrollerEl)]
+  for (let rowIndex = firstRowIndex + 1; rowIndex < lastRowIndex; rowIndex++) {
+    const line = lines[rowIndex]
+    if (!line || line.content == null) continue
+    const lineHtml = renderLine ? renderLine(line.content, line.lineIndex, line.id) : line.content
+    htmlParts.push(perLineHtml ? lineHtml : `<div class="line">${lineHtml}</div>`)
+  }
+  htmlParts.push(serializeRangeBalanced(lastRowRange, scrollerEl))
+
+  const joined = htmlParts.filter((part) => part.trim()).join(perLineHtml ? ' ' : '')
+  if (!joined.trim()) return null
+
+  return { joined, firstLineIndex: lines[firstRowIndex]?.lineIndex ?? null }
+}
+
 // ── Composable ────────────────────────────────────────────────────────────────
 
 /**
@@ -273,7 +340,7 @@ export function buildBookExportHtml(
 //   OFF: leave text as-is
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: ContextMenuItem[], buildFormattedHtml: () => string | null, onCopy: () => void, onPasteIntoWord: () => void, onSearchInRepository: () => void } {
+export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: ContextMenuItem[], buildFormattedHtml: () => string | null, onCopy: () => void, onPasteIntoWord: () => void, onSearchInRepository: () => void, buildSource: (firstLineIndex: number | null) => string } {
   const { scrollerEl, lines, isSelectAll, selectAllInContainer, bookTitle, tabStore } = options
   const settingsStore = useSettingsStore()
 
@@ -326,6 +393,18 @@ export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: Cont
   }
 
   /**
+   * How a line taken from the MODEL (select-all, or the scrolled-out middle of a long
+   * selection) is rendered for copy. The model holds raw DB text, so even without the
+   * note renderer it must get the screen's diacritics filter and divine-name censor —
+   * otherwise those lines paste niqqud and the full name the screen hides. DOM-read
+   * lines already have both.
+   */
+  function modelLineRenderer(): (raw: string, lineIndex: number, lineId: number) => string {
+    if (settingsStore.copyWithNotes && options.getRenderedLineContent) return options.getRenderedLineContent
+    return (raw) => contentInAnnotationOffsetSpace(raw, settingsStore.diacriticsState, settingsStore.censorOptions)
+  }
+
+  /**
    * Builds the final HTML for the current selection applying all active copy flags.
    * Returns null when there is no selection.
    * See the copy flag semantics block above for a full description of each flag.
@@ -345,8 +424,7 @@ export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: Cont
 
     if (isSelectAll.value) {
       // Copy-all: gather every line from the model (virtualization-independent).
-      const renderLine = settingsStore.copyWithNotes ? options.getRenderedLineContent : undefined
-      const result = extractSelection(scrollerEl.value, lines(), true, renderLine)
+      const result = extractSelection(scrollerEl.value, lines(), true, modelLineRenderer())
       if (!result) return null
       joined = result.joined
       firstLineIndex = result.firstLineIndex
@@ -355,9 +433,22 @@ export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: Cont
       const sel = window.getSelection()
       if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null
       const range = sel.getRangeAt(0)
-      if (settingsStore.copyJoinLines) {
+      const renderLine = modelLineRenderer()
+      // A selection long enough to have scrolled its middle out of the DOM is
+      // stitched from the model first; only a selection that lives entirely in the
+      // rendered window falls through to reading the DOM alone.
+      const stitched = extractSelectionWithUnmountedLines(
+        scrollerEl.value,
+        lines(),
+        options.selectedRowIndexRange(),
+        settingsStore.copyJoinLines,
+        renderLine,
+      )
+      if (stitched) {
+        joined = stitched.joined
+        firstLineIndex = stitched.firstLineIndex
+      } else if (settingsStore.copyJoinLines) {
         // Collect the selected .line innerHTML (optionally via the note renderer).
-        const renderLine = settingsStore.copyWithNotes ? options.getRenderedLineContent : undefined
         const result = extractSelection(scrollerEl.value, lines(), false, renderLine)
         if (!result) return null
         joined = result.joined
@@ -620,11 +711,16 @@ export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: Cont
         ],
       },
       { type: 'separator' },
+      { label: 'דיווח על טעות בספר', action: options.onReportError ?? (() => {}) },
+      { type: 'separator' },
       annotationRow,
     ],
     buildFormattedHtml,
     onCopy,
     onPasteIntoWord,
     onSearchInRepository,
+    // Exported so the error report names the line the SAME way a copied מקור does —
+    // one reference format in the app, built in one place.
+    buildSource: (firstLineIndex: number | null) => buildSource(firstLineIndex),
   }
 }

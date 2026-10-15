@@ -51,6 +51,8 @@ export function useAppTitleBarShortcuts(options: {
   toggleAddressBar: () => void
   /** Ctrl+M. Owned by the component for the same reason. */
   toggleNavDropdown: () => void
+  /** F8. Owned by the component, which holds the picker's open state. */
+  toggleWorkspaces: () => void
 }) {
   const { paneId, pane, titleBarVisible, isSplitViewAvailable } = options
   const bookViewStore = useBookViewStore()
@@ -103,6 +105,15 @@ export function useAppTitleBarShortcuts(options: {
         navigateInNewTab('הגדרות')
         return true
       }
+      // F8 - open the workspace picker. A bare function key rather than a Ctrl pair
+      // because every Ctrl+letter left is one the BROWSER takes before the page ever
+      // sees it: Ctrl+Shift+W closes the window outright, and preventDefault cannot
+      // call that back. F8 has no Chromium binding at all, and it joins the F-key
+      // family this app already has - F1 settings, F9 reading mode, F11 fullscreen.
+      if (e.code === 'F8') {
+        options.toggleWorkspaces()
+        return true
+      }
       // Alt+Arrow — the tab's own Back/Forward, like a browser. RTL: back is the
       // RIGHT arrow, matching the title-bar button icons. Ctrl+Arrow stays with
       // the book view's section navigation, which is why the modifier is Alt.
@@ -112,6 +123,17 @@ export function useAppTitleBarShortcuts(options: {
         e.stopPropagation()
         if (e.code === 'ArrowRight') pane.goBack()
         else pane.goForward()
+        return true
+      }
+      // Alt+W / Alt+X — history-aware close for the native-strip host, where
+      // Ctrl+W/X own the real tab close. Same semantics as Ctrl+W/X in VSTO/dev:
+      // remove the current page (or all pages) from both history stacks.
+      if (e.altKey && e.code === 'KeyW') {
+        pane.closeCurrentPage()
+        return true
+      }
+      if (e.altKey && e.code === 'KeyX') {
+        pane.closeAllPages()
         return true
       }
       return false
@@ -150,11 +172,16 @@ export function useAppTitleBarShortcuts(options: {
     switch (e.code) {
       // Closing is meaningless where there is only ever one tab — the store would just
       // replace it with a fresh home tab, which reads as "my document vanished".
+      // In VSTO and dev (no native strip), Ctrl+W instead removes the current page
+      // from both the per-tab history stack and recentLocations, then goes back.
+      // Ctrl+X does the same for all pages at once (clears everything, goes home).
       case 'KeyW':
         if (hasNativeChromeTabs) pane.closeTab(pane.activeTabId.value)
+        else pane.closeCurrentPage()
         return true
       case 'KeyX':
         if (hasNativeChromeTabs) pane.closeAllTabs()
+        else pane.closeAllPages()
         return true
       case 'KeyB':
         if (isBookViewActive.value) bookViewStore.toggleToolbar(paneId)

@@ -25,6 +25,11 @@
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>G</kbd></div><span class="shortcut-description">עבור לדף הבית</span></div>
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>M</kbd></div><span class="shortcut-description">פתח תפריט ראשי</span></div>
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>Shift</kbd><span class="kbd-plus">+</span><kbd>M</kbd></div><span class="shortcut-description">הצג / הסתר סרגל צד</span></div>
+    <div class="shortcut-row"><div class="shortcut-keys"><kbd>F8</kbd></div><span class="shortcut-description">פתח סביבות עבודה</span></div>
+    <!-- Inside the picker: the rows and the new-name box are one up/down walk, so these
+         are listed with it rather than as a group of their own. -->
+    <div class="shortcut-row"><div class="shortcut-keys"><kbd>F2</kbd></div><span class="shortcut-description">שנה שם סביבת עבודה (ברשימה)</span></div>
+    <div class="shortcut-row"><div class="shortcut-keys"><kbd>Delete</kbd></div><span class="shortcut-description">מחק סביבת עבודה (ברשימה)</span></div>
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>L</kbd></div><span class="shortcut-description">החלף ערכת נושא</span></div>
     <!-- Quick navigation -->
     <div class="shortcuts-group-label">ניווט מהיר</div>
@@ -52,6 +57,7 @@
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>חץ שמאלי</kbd></div><span class="shortcut-description">קטע הבא</span></div>
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>חץ ימני</kbd></div><span class="shortcut-description">קטע הקודם</span></div>
     <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>U</kbd></div><span class="shortcut-description">הצג / הסתר ציוני מפרשים</span></div>
+    <div class="shortcut-row"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>D</kbd></div><span class="shortcut-description">הסר / שחזר ניקוד וטעמים</span></div>
     <!-- Display -->
     <div class="shortcuts-group-label">תצוגה</div>
     <div class="shortcut-row" v-if="!isVstoEnvironment"><div class="shortcut-keys"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>|</kbd></div><span class="shortcut-description">תצוגה מפוצלת</span></div>

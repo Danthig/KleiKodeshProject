@@ -25,10 +25,11 @@
  */
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useEventListener } from '@vueuse/core'
-import { IconDismiss20Regular } from '@iconify-prerendered/vue-fluent'
+import { IconDismiss20Regular, IconZoomIn20Regular, IconZoomOut20Regular } from '@iconify-prerendered/vue-fluent'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { censorDivineNames } from '@/utils/censorDivineNames'
 import type { WordLinkTooltipData } from './useWordLinkTooltip'
+import { teamimFontStyle } from '@/utils/teamimFont'
 
 const props = withDefaults(
   defineProps<{
@@ -55,6 +56,25 @@ const emit = defineEmits<{
 
 const settingsStore = useSettingsStore()
 const html = computed(() => censorDivineNames(props.data.html, settingsStore.censorOptions))
+
+const headingStyle = computed(() => ({
+  fontFamily: settingsStore.commentaryHeaderFont,
+}))
+
+const bodyStyle = computed(() => ({
+  fontFamily: settingsStore.commentaryTextFont,
+}))
+
+/**
+ * Adjust the font size for the tooltip. Size is stored in percent (50-200).
+ */
+function increaseFontSize() {
+  settingsStore.wordLinkTooltipFontSize = Math.min(200, settingsStore.wordLinkTooltipFontSize + 10)
+}
+
+function decreaseFontSize() {
+  settingsStore.wordLinkTooltipFontSize = Math.max(50, settingsStore.wordLinkTooltipFontSize - 10)
+}
 
 /**
  * The target's TOC section, one entry per line, with the cited line flagged. Every
@@ -283,11 +303,7 @@ function placeBeside(rect: DOMRect, height: number, viewportW: number, viewportH
 
   resolvedMaxWidth.value = beside
   resolvedLeft.value = useStart ? rect.left - MARGIN - beside : rect.right + MARGIN
-  // The gap to bridge is horizontal now — the panel is level with the link, not
-  // above or below it — and the bridge belongs on the flank that faces the anchor.
   placement.value = 'beside'
-  // useStart put the panel to the LEFT of the anchor, so the anchor is off its
-  // right edge, and that is where the bridge belongs.
   besideSide.value = useStart ? 'right' : 'left'
 }
 
@@ -295,25 +311,17 @@ const style = computed(() => {
   if (resolvedTop.value === null) {
     // Not yet measured: render invisible so dimensions can be read on mount
     return {
-      position: 'fixed' as const,
+      position: 'absolute' as const,
       top: '-9999px',
       left: '-9999px',
-      maxWidth: `${Math.min(MAX_WIDTH, window.innerWidth - MARGIN * 2)}px`,
       zIndex: '9998',
       visibility: 'hidden' as const,
     }
   }
   return {
-    position: 'fixed' as const,
+    position: 'absolute' as const,
     top: `${resolvedTop.value}px`,
     left: `${resolvedLeft.value}px`,
-    // The beside placement narrows the panel to fit one flank of the anchor; every
-    // other placement keeps the usual width.
-    maxWidth: `${Math.min(resolvedMaxWidth.value ?? MAX_WIDTH, MAX_WIDTH, window.innerWidth - MARGIN * 2)}px`,
-    // Overrides the stylesheet's preferred cap. That one is a comfort target; this
-    // is the constraint that keeps the panel inside the viewport, so it has to win
-    // — hence inline, and hence unconditional rather than only when it bites.
-    maxHeight: `${resolvedMaxHeight.value}px`,
     zIndex: '9998',
   }
 })
@@ -436,6 +444,8 @@ onMounted(() => {
  * re-summon and has no state worth preserving across a layout change.
  */
 useEventListener(() => window, 'resize', () => emit('close'))
+
+
 </script>
 
 <template>
@@ -454,36 +464,64 @@ useEventListener(() => window, 'resize', () => emit('close'))
       @mouseleave="emit('pointer-leave')"
       @mousedown.left="emit('select-start')"
     >
-      <!-- Shown when there is a heading OR a close button to hold; an interactive
-           panel always has the latter, so it always keeps its header line. -->
-      <div v-if="heading || interactive" class="word-link-tooltip-title">
-        <span class="word-link-tooltip-heading">{{ heading }}</span>
-        <button
-          v-if="interactive"
-          class="word-link-tooltip-close"
-          type="button"
-          title="סגור"
-          aria-label="סגור"
-          @click="emit('close')"
-          @mousedown.left.stop
-        >
-          <IconDismiss20Regular />
-        </button>
-      </div>
-      <div ref="bodyRef" class="word-link-tooltip-body">
-        <template v-if="sectionLines">
+      <!-- Content wrapper with RTL direction for proper text flow -->
+      <div class="word-link-tooltip-content">
+        <!-- Shown when there is a heading OR a close button to hold; an interactive
+             panel always has the latter, so it always keeps its header line. -->
+        <div v-if="heading || interactive" class="word-link-tooltip-title" :style="headingStyle">
+          <span class="word-link-tooltip-heading">{{ heading }}</span>
+          <div class="word-link-tooltip-controls">
+            <button
+              v-if="interactive"
+              class="word-link-tooltip-button"
+              type="button"
+              title="הקטן טקסט"
+              aria-label="הקטן טקסט"
+              @click="decreaseFontSize"
+              @mousedown.left.stop
+            >
+              <IconZoomOut20Regular />
+            </button>
+            <button
+              v-if="interactive"
+              class="word-link-tooltip-button"
+              type="button"
+              title="הגדל טקסט"
+              aria-label="הגדל טקסט"
+              @click="increaseFontSize"
+              @mousedown.left.stop
+            >
+              <IconZoomIn20Regular />
+            </button>
+            <button
+              v-if="interactive"
+              class="word-link-tooltip-close"
+              type="button"
+              title="סגור"
+              aria-label="סגור"
+              @click="emit('close')"
+              @mousedown.left.stop
+            >
+              <IconDismiss20Regular />
+            </button>
+          </div>
+        </div>
+        <div ref="bodyRef" class="word-link-tooltip-body" :style="bodyStyle">
+          <template v-if="sectionLines">
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <div
+              v-for="line in sectionLines"
+              :key="line.id"
+              class="word-link-tooltip-line"
+              :class="{ 'is-focus': line.isFocus }"
+              :data-focus-line="line.isFocus ? '' : undefined"
+              :style="teamimFontStyle(line.html)"
+              v-html="line.html"
+            />
+          </template>
           <!-- eslint-disable-next-line vue/no-v-html -->
-          <div
-            v-for="line in sectionLines"
-            :key="line.id"
-            class="word-link-tooltip-line"
-            :class="{ 'is-focus': line.isFocus }"
-            :data-focus-line="line.isFocus ? '' : undefined"
-            v-html="line.html"
-          />
-        </template>
-        <!-- eslint-disable-next-line vue/no-v-html -->
-        <div v-else v-html="html" />
+          <div v-else :style="teamimFontStyle(html)" v-html="html" />
+        </div>
       </div>
     </div>
   </Teleport>
@@ -495,11 +533,10 @@ useEventListener(() => window, 'resize', () => emit('close'))
   border: 1px solid var(--border-color);
   border-radius: 3px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
-  padding: 6px 0;
-  direction: rtl;
-  font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-  font-size: 12.5px;
-  line-height: 1.7;
+  padding: 4px 0;
+  direction: ltr;
+  font-size: calc(12px * (v-bind('settingsStore.wordLinkTooltipFontSize') / 100));
+  line-height: 1.5;
   color: var(--text-primary);
   /* Long previews scroll, and the user must be able to reach that scrollbar — so
      this accepts the pointer, stated outright rather than left to the initial
@@ -507,21 +544,32 @@ useEventListener(() => window, 'resize', () => emit('close'))
   pointer-events: auto;
   display: flex;
   flex-direction: column;
-  /* Wider than tall: the panel is MAX_WIDTH (360px) across, and a preview taller than
-     that reads as a column rather than a passage — it also covers more of the text the
-     citation came from, which is what the reader is comparing it against. The vh term
-     only binds on short viewports; on a tall screen the px term is what applies, so it
-     is the one that decides the shape. A full section is normally longer than this — it
-     scrolls, and the cited line is scrolled to, so the cap costs no context. */
-  max-height: min(260px, 45vh);
+  /* Default size — must be present during the invisible measurement phase so that
+     computePosition reads the correct offsetWidth/offsetHeight. The inline width/height
+     from the settings store (applied via the style binding after positioning resolves)
+     overrides these once the user has resized. */
+  width: 360px;
+  height: 140px;
+  overflow: hidden;
+  /* Native HTML resize handle */
+  resize: both;
+}
+
+/* Content wrapper to restore RTL text flow */
+.word-link-tooltip-content {
+  direction: rtl;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .word-link-tooltip-title {
   padding-inline: 10px;
   font-weight: 600;
   font-size: 12px;
-  color: var(--accent-color);
+  color: var(--text-primary);
   padding-bottom: 4px;
   margin-bottom: 4px;
   border-bottom: 1px solid var(--border-color);
@@ -533,16 +581,52 @@ useEventListener(() => window, 'resize', () => emit('close'))
   flex-shrink: 0;
 }
 
-/* Takes the slack so the close button is pushed to the end edge — which under
+/* Takes the slack so the controls are pushed to the end edge — which under
    this panel's `dir="rtl"` is the visual LEFT. Logical properties throughout, so
-   the button stays on the correct side without hard-coding a direction. */
+   the buttons stay on the correct side without hard-coding a direction. */
 .word-link-tooltip-heading {
   flex: 1;
   min-width: 0;
-  /* A long book+path heading must not push the close button off the panel; it
+  /* A long book+path heading must not push the controls off the panel; it
      clips instead, matching the breadcrumb convention of clipping over ellipsis. */
   overflow: hidden;
   white-space: nowrap;
+  font-weight: 700;
+}
+
+.word-link-tooltip-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.word-link-tooltip-button {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+.word-link-tooltip-button:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.18));
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+.word-link-tooltip-button svg {
+  width: 14px;
+  height: 14px;
+  color: inherit;
 }
 
 .word-link-tooltip-close {
@@ -558,14 +642,14 @@ useEventListener(() => window, 'resize', () => emit('close'))
   border-radius: 3px;
   background: none;
   cursor: pointer;
-  /* theme.css pins `svg { color: ... }`, which severs currentColor inheritance —
-     the icon needs the colour handed to it explicitly. */
   color: var(--text-secondary);
+  opacity: 0.6;
 }
 
 .word-link-tooltip-close:hover {
   background: var(--bg-hover, rgba(127, 127, 127, 0.18));
   color: var(--text-primary);
+  opacity: 1;
 }
 
 .word-link-tooltip-close svg {
@@ -651,6 +735,7 @@ useEventListener(() => window, 'resize', () => emit('close'))
      Horizontal padding lives here rather than on the root so the scrollbar
      itself renders flush with the tooltip edge, with the gap on its inner side. */
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
   /* Makes this the offsetParent of the section lines, so their `offsetTop` is
      measured against the scroll container and can be assigned to `scrollTop`

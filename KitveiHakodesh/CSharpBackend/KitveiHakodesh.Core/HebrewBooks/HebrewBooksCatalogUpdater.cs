@@ -15,8 +15,17 @@ namespace KitveiHakodesh.Core.HebrewBooks
     /// Keeps the bundled catalog current by walking upstream book ids past the highest one we
     /// already hold and appending whatever it finds.
     ///
-    /// This scrapes someone else's site, so it is deliberately unhurried: it runs a few times a
-    /// year, waits a second between requests, and never runs two walks at once.
+    /// This scrapes someone else's site, so it is deliberately unhurried: a completed walk
+    /// happens a few times a year, it waits a second between requests, and one instance never
+    /// runs two walks at once (the guard is per-instance — it does not coordinate across
+    /// processes, so there should only ever be one caller driving this).
+    ///
+    /// IT CAN STOP EARLY. When requests stop completing — offline, a filtering proxy, an
+    /// outage — it gives up after a few consecutive failures and reports
+    /// <see cref="HebrewBooksCatalogUpdateSkip.NoConnection"/> rather than spending its whole
+    /// missing-id budget on requests that were always going to fail. Such a run is left
+    /// UNSTAMPED on purpose: it established nothing, so it is still due. That means the
+    /// interval below bounds how often a walk COMPLETES, not how often one starts.
     ///
     /// It writes into the catalog IN PLACE — there is one catalog file, never a second copy
     /// shadowing it. On a read-only install that means the catalog cannot grow, which is
@@ -28,9 +37,13 @@ namespace KitveiHakodesh.Core.HebrewBooks
         private const string BookPageUrlFormat = "https://beta.hebrewbooks.org/{0}";
 
         /// <summary>
-        /// Roughly a quarter. The upstream catalog grows slowly and every run is traffic on
-        /// someone else's server, so monthly — what this did before — asks far more often than
-        /// the data changes. A const, not a setting: nobody has asked to tune it.
+        /// Roughly a quarter, between COMPLETED walks. The upstream catalog grows slowly and
+        /// every run is traffic on someone else's server, so monthly — what this did before —
+        /// asks far more often than the data changes. A const, not a setting: nobody has asked
+        /// to tune it.
+        ///
+        /// A run that stops early is not stamped and so is still due; a caller that retries
+        /// immediately would walk again at once, which is why the service backs off instead.
         /// </summary>
         public const int UpdateIntervalDays = 90;
 
@@ -50,6 +63,21 @@ namespace KitveiHakodesh.Core.HebrewBooks
         /// requests, about 25 minutes at the delay below, once a quarter.
         /// </summary>
         private const int MaxConsecutiveMissingIds = 1500;
+
+        /// <summary>
+        /// How many requests in a row may FAIL TO COMPLETE before the walk concludes there is
+        /// no connection and stops.
+        ///
+        /// A failed request is not evidence that an id is empty, but it used to count towards
+        /// the missing-id budget all the same — so an offline machine walked the full 1,500,
+        /// a second apart, and spent twenty-five minutes failing before it gave up. That is
+        /// the ordinary state of a laptop, not a fault.
+        ///
+        /// Five, not one: a single dropped request mid-walk is normal and must not abandon a
+        /// run that is otherwise working. Five consecutive failures is a network that is gone,
+        /// and costs five seconds to establish.
+        /// </summary>
+        private const int MaxConsecutiveFetchFailures = 5;
 
         /// <summary>A second between requests. This is a courtesy to the site being scraped,
         /// not a rate limit anyone imposed — do not shorten it to make a run finish sooner.</summary>
@@ -184,6 +212,7 @@ namespace KitveiHakodesh.Core.HebrewBooks
         {
             int bookId = _catalog.MaxBookId() + 1;
             int consecutiveMissing = 0;
+            int consecutiveFailures = 0;
 
             using var connection = SqliteConnectionFactory.OpenBundledWrite(_catalog.DatabasePath);
 
@@ -198,14 +227,35 @@ namespace KitveiHakodesh.Core.HebrewBooks
                     Insert(connection, outcome.Book);
                     result.BooksAdded++;
                     consecutiveMissing = 0;
+                    consecutiveFailures = 0;
+                }
+                else if (outcome.FetchFailed)
+                {
+                    // Could not REACH the page. That says nothing about whether a book lives
+                    // at this id, so it must not count towards the missing-id budget — doing
+                    // so is what made an offline run walk 1,500 ids to learn it was offline.
+                    result.FetchFailures.Add(bookId);
+                    consecutiveFailures++;
+
+                    if (consecutiveFailures >= MaxConsecutiveFetchFailures)
+                    {
+                        // Leave the stamp unwritten: nothing was established about the upstream
+                        // catalog, so the next due check should try again rather than wait out
+                        // another full interval.
+                        result.SkipReason = HebrewBooksCatalogUpdateSkip.NoConnection;
+                        return;
+                    }
                 }
                 else
                 {
-                    // A request that never completed is not evidence the id is empty, but it
-                    // still has to count towards the stop condition or an offline machine walks
-                    // forever. It is recorded so the caller can see the run covered less than
-                    // the id range suggests.
-                    if (outcome.FetchFailed) result.FetchFailures.Add(bookId);
+                    // The page answered and held no book. THIS is a missing id.
+                    //
+                    // It does NOT reset the failure budget. Only a book actually found does,
+                    // because only that proves the connection is working. Resetting here would
+                    // mean an upstream alternating 404 and 503 — a filtering proxy, a flaky
+                    // CDN — never accumulates five failures in a row, so it walks the whole
+                    // 1,500-id budget and then STAMPS a clean completion for a run that
+                    // established nothing, putting the catalog to sleep for a full interval.
                     consecutiveMissing++;
                 }
 
@@ -246,7 +296,17 @@ namespace KitveiHakodesh.Core.HebrewBooks
                     .GetAsync(string.Format(BookPageUrlFormat, bookId), cancellationToken)
                     .ConfigureAwait(false);
 
-                if (!response.IsSuccessStatusCode) return FetchOutcome.NoSuchBook;
+                // NOT every failure status means "no book here". A 404 does. A 403, a 429 or
+                // any 5xx means the SERVER refused or broke, which says nothing about the id —
+                // and treating those as empty ids is how a blanket refusal (a rate limit, a
+                // filtering proxy, an outage) walks the entire missing-id budget pretending it
+                // had reached the end of the catalog. Verified in the wild: upstream answers
+                // 403 to every id from some networks, which looked exactly like 1,500 empty
+                // ids in a row and cost twenty-five minutes to conclude nothing.
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    return FetchOutcome.NoSuchBook;
+                if (!response.IsSuccessStatusCode)
+                    return FetchOutcome.Unreachable;
                 html = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

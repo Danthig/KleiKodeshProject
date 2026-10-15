@@ -103,10 +103,10 @@ namespace KitveiHakodesh.Core.HebrewBooks
         {
             if (Interlocked.Exchange(ref _sweptStaleParts, 1) == 0) SweepStaleParts();
 
-            if (!IsValidBookId(bookId))
+            if (!HebrewBooksLocalFolder.IsValidBookId(bookId))
                 return HebrewBookAcquireResult.Failed(HebrewBookAcquireFailure.InvalidBookId);
 
-            string? inUserFolder = LocalFolderHit(localFolder, bookId);
+            string? inUserFolder = HebrewBooksLocalFolder.LocalFolderHit(localFolder, bookId);
             if (inUserFolder != null) return HebrewBookAcquireResult.Success(inUserFolder);
 
             string cached = Path.Combine(_cacheDirectory, bookId + ".pdf");
@@ -227,7 +227,7 @@ namespace KitveiHakodesh.Core.HebrewBooks
 
             foreach (string bookId in bookIds)
             {
-                if (!IsValidBookId(bookId)) continue;
+                if (!HebrewBooksLocalFolder.IsValidBookId(bookId)) continue;
                 try
                 {
                     if (File.Exists(Path.Combine(localFolder, bookId + ".pdf"))) present.Add(bookId);
@@ -241,7 +241,7 @@ namespace KitveiHakodesh.Core.HebrewBooks
         /// <summary>Removes a downloaded PDF from the user's folder.</summary>
         public HebrewBookDeleteOutcome DeleteDownloaded(string bookId, string? localFolder)
         {
-            if (!IsValidBookId(bookId)) return HebrewBookDeleteOutcome.InvalidBookId;
+            if (!HebrewBooksLocalFolder.IsValidBookId(bookId)) return HebrewBookDeleteOutcome.InvalidBookId;
             if (string.IsNullOrWhiteSpace(localFolder)) return HebrewBookDeleteOutcome.NoLocalFolderConfigured;
 
             try
@@ -254,33 +254,6 @@ namespace KitveiHakodesh.Core.HebrewBooks
             catch (Exception)
             {
                 return HebrewBookDeleteOutcome.DeleteFailed;
-            }
-        }
-
-        /// <summary>
-        /// Book ids are numeric upstream. Anything else could steer the request URL or escape
-        /// the folder the {id}.pdf name is built in, so it never gets that far. EVERY entry
-        /// point that turns a caller's id into a path or a URL checks this first.
-        /// </summary>
-        private static bool IsValidBookId(string? bookId)
-        {
-            if (string.IsNullOrWhiteSpace(bookId)) return false;
-            foreach (char c in bookId!)
-                if (c < '0' || c > '9') return false;
-            return true;
-        }
-
-        private static string? LocalFolderHit(string? localFolder, string bookId)
-        {
-            if (string.IsNullOrWhiteSpace(localFolder)) return null;
-            try
-            {
-                string candidate = Path.Combine(localFolder, bookId + ".pdf");
-                return File.Exists(candidate) ? candidate : null;
-            }
-            catch (Exception)
-            {
-                return null; // drive disconnected or the path is malformed — fall through to download
             }
         }
 

@@ -8,13 +8,15 @@ if (-not $Debug -and -not $Release) {
     $Release = $true
 }
 
+# Every path below is relative to the repo root.
+Set-Location $PSScriptRoot
+
 $msbuild = "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"
 
 # Correct build order: dependencies first, then VSTO last
 $projects = @(
     # Shared libraries (no dependencies)
     "WpfLib/WpfLib.csproj",
-    "UpdateCheckerLib/UpdateCheckerLib.csproj",
     
     # DocDesign (depends on WpfLib)
     "KleiKodeshVsto/DocDesign/DocDesignLib/DocDesignLib.csproj",
@@ -37,14 +39,8 @@ $projects = @(
     "KleiKodeshVsto/Nakdan/NakdanDemo/NakdanDemo.csproj",
     
     # KitveiHakodesh backend
-    "KitveiHakodesh/CSharpBackend/Ftslib-Csharp/FtsLib/FtsLib.csproj",
-    "KitveiHakodesh/CSharpBackend/Ftslib-Csharp/FtsLibDemo/FtsLibDemo.csproj",
-    "KitveiHakodesh/CSharpBackend/Ftslib-Csharp/FtsLibTest/FtsLibTest.csproj",
-    "KitveiHakodesh/CSharpBackend/DocumentLocator/DocumentLocator/DocumentLocator.csproj",
-    "KitveiHakodesh/CSharpBackend/DocumentLocator/DocumentLocator.Client/DocumentLocator.Client.csproj",
-    "KitveiHakodesh/CSharpBackend/DocumentLocator/DocumentLocator.Service/DocumentLocator.Service.csproj",
-    "KitveiHakodesh/CSharpBackend/DocumentLocator/DocumentLocator.Demo/DocumentLocator.Demo.csproj",
-    "KitveiHakodesh/CSharpBackend/DocumentLocator/DocumentLocator.Tests/DocumentLocator.Tests.csproj",
+    "KitveiHakodesh/CSharpBackend/FtsLib-Csharp/FtsLib/FtsLib.csproj",
+    "KitveiHakodesh/CSharpBackend/FtsLib-Csharp/FtsLibTest/FtsLibTest.csproj",
     "KitveiHakodesh/CSharpBackend/KitveiHakodeshLib/KitveiHakodeshLib.csproj",
     "KitveiHakodesh/CSharpBackend/KitveiHakodeshDemoApp/KitveiHakodeshDemoApp.csproj",
     
@@ -85,11 +81,9 @@ Get-ChildItem -Path "." -Recurse -Directory -Include "bin","obj" |
     }
 Write-Host "  Removed $cleaned folders" -ForegroundColor Gray
 
-# SDK-style projects that need dotnet restore (project.assets.json lives in obj)
-$sdkProjects = @(
-    "Build/scripts/SvgToPng/SvgToPng.csproj",
-    "Build/Installer/KleiKodeshVstoInstallerWpf.csproj"
-)
+# SDK-style projects need dotnet restore: project.assets.json lives in obj, which was just
+# deleted. Detected from $projects so this can't drift from the build list.
+$sdkProjects = @($projects | Where-Object { Select-String -Path $_ -Pattern '<Project Sdk=' -Quiet })
 
 Write-Host "`nRestoring SDK-style projects..." -ForegroundColor Yellow
 foreach ($sdkProject in $sdkProjects) {

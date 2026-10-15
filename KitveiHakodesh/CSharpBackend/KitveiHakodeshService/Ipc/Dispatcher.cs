@@ -1,5 +1,9 @@
 using System.Text.Json;
 using KitveiHakodeshService.Catalog;
+using KitveiHakodesh.Core.Settings;
+using KitveiHakodesh.Core.HebrewBooks;
+using KitveiHakodesh.Core.LocalFiles;
+using KitveiHakodesh.Core.WordDocuments;
 using KitveiHakodeshService.Dictionary;
 using KitveiHakodeshService.HebrewBooks;
 using KitveiHakodeshService.Http;
@@ -15,7 +19,7 @@ namespace KitveiHakodeshService.Ipc;
 /// each future capability adds one case here.
 /// </summary>
 public sealed class Dispatcher(
-    DocumentLocatorService locator,
+    LocalFileIndexService locator,
     HebrewBooksService hebrewBooks,
     DictionaryService dictionary,
     SeforimDbService seforim,
@@ -25,6 +29,8 @@ public sealed class Dispatcher(
     HttpHostState httpState,
     LocalFileGrants localFileGrants,
     KitveiHakodeshService.Pdf.WordConversionService wordConversion,
+    KitveiHakodeshService.Http.OwnerRegistry owners,
+    KitveiHakodeshService.KitveiHakodesh.Updater updater,
     IHostApplicationLifetime lifetime,
     ILogger<Dispatcher> logger)
 {
@@ -43,6 +49,11 @@ public sealed class Dispatcher(
 
         if (req is null || string.IsNullOrEmpty(req.Op))
             return RpcResponse.Err("Missing 'op'.");
+
+        // A Windows service lives in session 0: no desktop, no user Word, no shell. The hosts do
+        // those themselves; a request that still arrives here is answered, not left to hang.
+        if (Hosting.WindowsServiceMode.IsWindowsService && Hosting.WindowsServiceMode.IsDesktopOnlyOp(req.Op))
+            return RpcResponse.Err(Hosting.WindowsServiceMode.DesktopOnlyOpError(req.Op));
 
         try
         {
@@ -90,11 +101,10 @@ public sealed class Dispatcher(
                     // OOXML→HTML fallback (wiki-style footnotes) when Word is unavailable. The
                     // FileName's extension (.pdf/.html) tells the client which viewer to use.
                     string servePath = full;
-                    string fileName = System.IO.Path.GetFileName(full);
+                    bool renderedAsHtml = false;
                     if (needsConvert)
                     {
-                        bool isHtml;
-                        try { (servePath, isHtml) = await wordConversion.RenderAsync(full, ct); }
+                        try { (servePath, renderedAsHtml) = await wordConversion.RenderAsync(full, ct); }
                         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                         {
                             // User pressed ביטול — abort quietly (partial output already deleted).
@@ -104,22 +114,20 @@ public sealed class Dispatcher(
                         {
                             return RpcResponse.Ok(MsgPack.Ser(new OpenLocalFileResult { Error = ex.Message }));
                         }
-                        fileName = System.IO.Path.GetFileNameWithoutExtension(full) + (isHtml ? ".html" : ".pdf");
                     }
+                    string fileName = LocalFileOpenRules.ServedFileName(full, needsConvert, renderedAsHtml);
 
                     string fileHandle = localFileGrants.Grant(servePath);
-                    string servedExt = System.IO.Path.GetExtension(fileName).ToLowerInvariant();
-                    bool isHtmlFile = servedExt == ".html" || servedExt == ".htm";
+                    bool isHtmlFile = LocalFileOpenRules.IsHtml(fileName);
 
                     // Folder grant for HTML so siblings (CSS/JS/images) load correctly.
                     string folderHandle = "";
                     bool isOtzariaAddin = false;
                     if (isHtmlFile)
                     {
-                        string folder = System.IO.Path.GetDirectoryName(full) ?? full;
+                        string folder = LocalFileOpenRules.AssetFolderOf(full);
                         folderHandle = localFileGrants.GrantFolder(folder);
-                        // Otzaria addins have a manifest.json in the same directory.
-                        isOtzariaAddin = File.Exists(System.IO.Path.Combine(folder, "manifest.json"));
+                        isOtzariaAddin = LocalFileOpenRules.IsOtzariaAddinFolder(folder);
                     }
 
                     return RpcResponse.Ok(MsgPack.Ser(new OpenLocalFileResult
@@ -141,7 +149,7 @@ public sealed class Dispatcher(
                     // An initial folder is optional: the home page's frequent-folder tiles send one,
                     // the plain open-file action sends an empty string.
                     var pickArgs = MsgPack.De<StringArg>(req.Args);
-                    string? picked = await LocalFiles.NativeFilePicker.PickAsync(
+                    string? picked = await NativeFilePicker.PickAsync(
                         initialDir: pickArgs.Value ?? "");
                     return RpcResponse.Ok(MsgPack.Ser(picked is null
                         ? new PickLocalFileResult { Cancelled = true }
@@ -156,7 +164,7 @@ public sealed class Dispatcher(
                 {
                     var a = MsgPack.De<StringArg>(req.Args);
                     string title = string.IsNullOrWhiteSpace(a.Value) ? "בחר תיקייה" : a.Value!;
-                    string? picked = await LocalFiles.NativeFolderPicker.PickAsync(title);
+                    string? picked = await NativeFolderPicker.PickAsync(title);
                     return RpcResponse.Ok(MsgPack.Ser(picked is null
                         ? new PickFolderResult { Cancelled = true }
                         : new PickFolderResult { Path = picked }));
@@ -164,7 +172,7 @@ public sealed class Dispatcher(
 
                 // Excluded folders for file search — persisted in excluded_folders.json BESIDE
                 // the index directory (a reindex deletes that directory) via the SAME shared
-                // ExcludedFoldersPersistence the hosted DocumentLocator service uses, so the
+                // LocalFileIndexExcludedFolders the hosted DocumentLocator service uses, so the
                 // file format and the exclusion semantics are identical. The DIRECTORY is not:
                 // each host resolves it from its own base directory, so this dev-only service
                 // keeps its own list rather than editing the installed one. Applied at search
@@ -205,19 +213,10 @@ public sealed class Dispatcher(
                     var a = MsgPack.De<OpenInDefaultAppArgs>(req.Args);
                     if (!localFileGrants.TryValidateForShellOpen(a.Path, out string full, out string error))
                         return RpcResponse.Ok(MsgPack.Ser(new OpenInDefaultAppResult { Error = error }));
-                    try
-                    {
-                        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = full,
-                            UseShellExecute = true,
-                        });
-                        return RpcResponse.Ok(MsgPack.Ser(new OpenInDefaultAppResult { Ok = true }));
-                    }
-                    catch (Exception ex)
-                    {
-                        return RpcResponse.Ok(MsgPack.Ser(new OpenInDefaultAppResult { Error = ex.Message }));
-                    }
+                    string? openError = LocalFileOpenRules.OpenInDefaultApp(full);
+                    return RpcResponse.Ok(MsgPack.Ser(openError is null
+                        ? new OpenInDefaultAppResult { Ok = true }
+                        : new OpenInDefaultAppResult { Error = openError }));
                 }
 
                 // System font families that can render Hebrew — the dev-mode equivalent of the
@@ -229,7 +228,7 @@ public sealed class Dispatcher(
                 case "getFonts":
                     return RpcResponse.Ok(MsgPack.Ser(new FontsResult
                     {
-                        Fonts = LocalFiles.HebrewFontsProvider.GetHebrewFonts(),
+                        Fonts = global::KitveiHakodesh.Core.Common.HebrewFonts.GetHebrewFonts(),
                     }));
 
                 // Open assembled HTML as a new Word document — the dev-mode equivalent of the
@@ -239,9 +238,7 @@ public sealed class Dispatcher(
                 case "exportToWord":
                 {
                     var a = MsgPack.De<ExportToWordArgs>(req.Args);
-                    if (string.IsNullOrEmpty(a.Html))
-                        return RpcResponse.Ok(MsgPack.Ser(new ExportToWordResult { Error = "No HTML to export." }));
-                    string? exportError = await DocConvertLib.AotWordPaste.ExportAsync(a.Html!, a.Title ?? "");
+                    string? exportError = await WordDocumentExporter.ExportHtmlAsNewDocumentAsync(a.Html, a.Title);
                     return RpcResponse.Ok(MsgPack.Ser(exportError is null
                         ? new ExportToWordResult { Ok = true }
                         : new ExportToWordResult { Error = exportError }));
@@ -255,18 +252,68 @@ public sealed class Dispatcher(
                 // at their document. Runs on an STA thread inside PasteAsync.
                 case "pasteIntoWord":
                 {
-                    string? error = await DocConvertLib.AotWordPaste.PasteAsync();
+                    string? error = await WordDocumentExporter.PasteClipboardAtCursorAsync();
                     return RpcResponse.Ok(MsgPack.Ser(error is null
                         ? new PasteIntoWordResult { Ok = true }
                         : new PasteIntoWordResult { Error = error }));
                 }
+
+                // Self-update, the user's decision: the app asks whether a downloaded update is ready,
+                // asks the user, and on "install now" the service starts the installer as the user.
+                case "getUpdateStatus":
+                    return RpcResponse.Ok(MsgPack.Ser(ReadUpdateStatus()));
+
+                // The settings page's "check now": the weekly pass, run on demand (download included,
+                // so it can take minutes). Only the installed service updates - see UpdaterService.
+                case "checkForUpdateNow":
+                {
+                    string checkError = "";
+                    if (!Hosting.WindowsServiceMode.IsWindowsService)
+                        checkError = "updates are checked only by the installed service";
+                    else if (AppSettingsRegistry.GetTurnOffUpdates())
+                        checkError = "automatic updates are turned off";
+                    else
+                    {
+                        try { await updater.FindOrDownloadNewerInstallerAsync(ct); }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex)
+                        {
+                            logger.LogWarning(ex, "Update check (on demand) failed");
+                            checkError = ex.Message;
+                        }
+                    }
+                    UpdateStatusResult status = ReadUpdateStatus();
+                    status.CheckError = checkError;
+                    return RpcResponse.Ok(MsgPack.Ser(status));
+                }
+                case "installUpdate":
+                {
+                    var ready = KitveiHakodeshService.KitveiHakodesh.Updater.ReadyInstaller();
+                    if (ready is null)
+                        return RpcResponse.Ok(MsgPack.Ser(new OpenInDefaultAppResult { Ok = false, Error = "no update is ready" }));
+                    // No arguments, ever: the installer is a release of its own (a flag it does not
+                    // know has wedged updates before). It asks to close Word and the app itself.
+                    Hosting.UserSessionProcess.Launch(ready.Value.Path);
+                    return RpcResponse.Ok(MsgPack.Ser(new OpenInDefaultAppResult { Ok = true }));
+                }
+
+                // A host using this console instance says hello / goodbye (Http/OwnerWatcher). The
+                // installed Windows service ignores both.
+                case "registerOwner":
+                    owners.Register(MsgPack.De<OwnerArgs>(req.Args).Pid);
+                    return RpcResponse.Ok(MsgPack.Ser(new PongResult()));
+                case "releaseOwner":
+                    owners.Release(MsgPack.De<OwnerArgs>(req.Args).Pid);
+                    return RpcResponse.Ok(MsgPack.Ser(new PongResult()));
 
                 // Graceful shutdown: triggers host stop → FtsIndexingStarter.StopAsync
                 // cancels the build cleanly (aborts any merge, releases the index lock)
                 // before the process exits. The dev killer calls this before taskkill so
                 // a restart never hard-kills a build in progress (index-corruption path).
                 case "shutdown":
-                    lifetime.StopApplication();
+                    // Stop AFTER the reply has gone out: stopping cancels the pipe server's token,
+                    // and the installer that asked reads the acknowledgement.
+                    _ = Task.Run(async () => { await Task.Delay(150); lifetime.StopApplication(); });
                     return RpcResponse.Ok(MsgPack.Ser(new ShuttingDownResult()));
 
                 // ── Seforim DB location (settings page / setup wizard) ─────────
@@ -278,25 +325,32 @@ public sealed class Dispatcher(
                 // rebuilt on startup via the fts.ver source-DB marker.
                 case "getSeforimDbPath":
                 {
-                    string p = SeforimDbLocator.Resolve();
+                    // Null = nothing found. Core no longer hands back a default path that is
+                    // known not to exist, so the settings page is told plainly that there is no
+                    // database rather than being shown a path it would report as missing.
+                    string? p = SeforimDbLocator.Resolve();
                     return RpcResponse.Ok(MsgPack.Ser(new DbPathResult
                     {
-                        Path = p,
+                        Path = p ?? "",
                         IsCustom = SeforimDbLocator.IsCustom(),
-                        Exists = File.Exists(p),
+                        Exists = p is not null,
+                        // Detected only, never repaired: deleting the journal would corrupt the
+                        // database; Otzaria rolls it back or completes it on its next run.
+                        UpdateInterrupted = SeforimDbLibrarySwitcher.IsUpdateInterrupted(p),
                     }));
                 }
 
                 case "setSeforimDbPath":
                 {
                     var a = MsgPack.De<DbPathArgs>(req.Args);
-                    string p = (a.Path ?? "").Trim().Trim('"');
-                    if (string.IsNullOrWhiteSpace(p))
-                        return RpcResponse.Ok(MsgPack.Ser(new DbPathResult { Error = "empty path" }));
-                    if (!File.Exists(p))
-                        return RpcResponse.Ok(MsgPack.Ser(new DbPathResult { Path = p, Error = "file not found" }));
-
-                    SeforimDbLocator.SaveRegistryPath(p);
+                    string p = SeforimDbLibrarySwitcher.NormalizePath(a.Path);
+                    switch (SwitchLibrary(p))
+                    {
+                        case SeforimDbLibrarySwitcher.SwitchOutcome.EmptyPath:
+                            return RpcResponse.Ok(MsgPack.Ser(new DbPathResult { Error = "empty path" }));
+                        case SeforimDbLibrarySwitcher.SwitchOutcome.FileNotFound:
+                            return RpcResponse.Ok(MsgPack.Ser(new DbPathResult { Path = p, Error = "file not found" }));
+                    }
                     RestartSoon();
                     return RpcResponse.Ok(MsgPack.Ser(new DbPathResult
                     {
@@ -310,14 +364,12 @@ public sealed class Dispatcher(
                 // carries Cancelled so the settings page leaves the field untouched.
                 case "pickSeforimDbPath":
                 {
-                    string? picked = await LocalFiles.NativeFilePicker.PickAsync(
-                        LocalFiles.NativeFilePicker.DatabaseFilter, "בחר קובץ מסד נתונים");
+                    string? picked = await NativeFilePicker.PickAsync(
+                        NativeFilePicker.DatabaseFilter, NativeFilePicker.DatabaseDialogTitle);
                     if (picked is null)
                         return RpcResponse.Ok(MsgPack.Ser(new DbPathResult { Cancelled = true }));
-                    if (!File.Exists(picked))
+                    if (SwitchLibrary(picked) != SeforimDbLibrarySwitcher.SwitchOutcome.Switched)
                         return RpcResponse.Ok(MsgPack.Ser(new DbPathResult { Path = picked, Error = "file not found" }));
-
-                    SeforimDbLocator.SaveRegistryPath(picked);
                     RestartSoon();
                     return RpcResponse.Ok(MsgPack.Ser(new DbPathResult
                     {
@@ -328,11 +380,11 @@ public sealed class Dispatcher(
                 case "clearSeforimDbPath":
                 {
                     SeforimDbLocator.ClearRegistryPath();
-                    string p = SeforimDbLocator.Resolve();
+                    string? p = SeforimDbLocator.Resolve();
                     RestartSoon();
                     return RpcResponse.Ok(MsgPack.Ser(new DbPathResult
                     {
-                        Path = p, IsCustom = false, Exists = File.Exists(p), Restarting = true,
+                        Path = p ?? "", IsCustom = false, Exists = p is not null, Restarting = true,
                     }));
                 }
 
@@ -348,6 +400,11 @@ public sealed class Dispatcher(
                 case "locateDocumentsWarmup":
                     locator.Warmup();
                     return RpcResponse.Ok(MsgPack.Ser(new StartedResult()));
+
+                // Polled while a search is in flight so the page can say "building the
+                // index" instead of "searching". Must stay non-blocking — see GetIndexStatus.
+                case "localFileIndexStatus":
+                    return RpcResponse.Ok(MsgPack.Ser(locator.GetIndexStatus()));
 
                 // App-load warm-up: an app that just loaded is about to need the seforim
                 // DB — pay the service's one-time cold costs (native lib, first connection,
@@ -376,18 +433,17 @@ public sealed class Dispatcher(
                 case "triggerHbDownload":
                 {
                     var a = MsgPack.De<HbDownloadArgs>(req.Args);
-                    string folder = string.IsNullOrWhiteSpace(a.LocalFolder)
-                        ? AppSettingsRegistry.GetHbLocalFolder() : a.LocalFolder!;
+                    string folder = HebrewBooksLocalFolder.Resolve(a.LocalFolder);
                     if (!a.IsOnline)
                     {
                         // No connectivity — only a local/cache hit can satisfy; otherwise report offline.
                         var offline = await hebrewBooks.AcquireAsync(a.BookId ?? "", folder, allowDownload: false, ct);
                         return RpcResponse.Ok(MsgPack.Ser(offline.Path is null
                             ? new HbDownloadResult { NoInternet = true }
-                            : new HbDownloadResult { Handle = localFileGrants.Grant(offline.Path) }));
+                            : new HbDownloadResult { Handle = localFileGrants.Grant(offline.Path), Path = offline.Path }));
                     }
                     var r = await hebrewBooks.AcquireAsync(a.BookId ?? "", folder, allowDownload: true, ct);
-                    if (r.Path != null) return RpcResponse.Ok(MsgPack.Ser(new HbDownloadResult { Handle = localFileGrants.Grant(r.Path) }));
+                    if (r.Path != null) return RpcResponse.Ok(MsgPack.Ser(new HbDownloadResult { Handle = localFileGrants.Grant(r.Path), Path = r.Path }));
                     if (r.NotFound) return RpcResponse.Ok(MsgPack.Ser(new HbDownloadResult { NotFound = true }));
                     if (r.Error == "cancelled") return RpcResponse.Ok(MsgPack.Ser(new HbDownloadResult { Cancelled = true }));
                     if (r.Error == "network error") return RpcResponse.Ok(MsgPack.Ser(new HbDownloadResult { NoInternet = true }));
@@ -431,19 +487,17 @@ public sealed class Dispatcher(
                 case "restoreHbPdf":
                 {
                     var a = MsgPack.De<HbDownloadArgs>(req.Args);
-                    string folder = string.IsNullOrWhiteSpace(a.LocalFolder)
-                        ? AppSettingsRegistry.GetHbLocalFolder() : a.LocalFolder!;
+                    string folder = HebrewBooksLocalFolder.Resolve(a.LocalFolder);
                     var r = await hebrewBooks.AcquireAsync(a.BookId ?? "", folder, allowDownload: false, ct);
                     return RpcResponse.Ok(MsgPack.Ser(r.Path != null
-                        ? new HbDownloadResult { Handle = localFileGrants.Grant(r.Path) }
+                        ? new HbDownloadResult { Handle = localFileGrants.Grant(r.Path), Path = r.Path }
                         : new HbDownloadResult { Redownload = true }));
                 }
 
                 case "checkHbLocalFiles":
                 {
                     var a = MsgPack.De<HbCheckLocalArgs>(req.Args);
-                    string folder = string.IsNullOrWhiteSpace(a.LocalFolder)
-                        ? AppSettingsRegistry.GetHbLocalFolder() : a.LocalFolder!;
+                    string folder = HebrewBooksLocalFolder.Resolve(a.LocalFolder);
                     var existing = hebrewBooks.CheckLocalFiles(a.BookIds ?? new(), folder);
                     return RpcResponse.Ok(MsgPack.Ser(new HbCheckLocalResult { ExistingIds = existing }));
                 }
@@ -451,8 +505,7 @@ public sealed class Dispatcher(
                 case "deleteHbLocalFile":
                 {
                     var a = MsgPack.De<HbDeleteLocalArgs>(req.Args);
-                    string folder = string.IsNullOrWhiteSpace(a.LocalFolder)
-                        ? AppSettingsRegistry.GetHbLocalFolder() : a.LocalFolder!;
+                    string folder = HebrewBooksLocalFolder.Resolve(a.LocalFolder);
                     var (ok, notFound, error) = hebrewBooks.DeleteLocalFile(a.BookId ?? "", folder);
                     return RpcResponse.Ok(MsgPack.Ser(new HbDeleteLocalResult { Ok = ok, NotFound = notFound, Error = error }));
                 }
@@ -460,13 +513,13 @@ public sealed class Dispatcher(
                 // HB local folder in the SHARED registry (same key the hosted AppSettings uses),
                 // so dev and the hosted app agree on where books are saved.
                 case "getHbLocalFolder":
-                    return RpcResponse.Ok(MsgPack.Ser(new StringResult { Value = AppSettingsRegistry.GetHbLocalFolder() }));
+                    return RpcResponse.Ok(MsgPack.Ser(new StringResult { Value = AppSettingsRegistry.GetHebrewBooksLocalFolder() }));
 
                 case "setHbLocalFolder":
                 {
                     var a = MsgPack.De<StringArg>(req.Args);
-                    AppSettingsRegistry.SetHbLocalFolder(a.Value ?? "");
-                    return RpcResponse.Ok(MsgPack.Ser(new StringResult { Value = AppSettingsRegistry.GetHbLocalFolder() }));
+                    AppSettingsRegistry.SetHebrewBooksLocalFolder(a.Value ?? "");
+                    return RpcResponse.Ok(MsgPack.Ser(new StringResult { Value = AppSettingsRegistry.GetHebrewBooksLocalFolder() }));
                 }
 
                 // Automatic update check, in the registry value SHARED with the hosted app and the
@@ -482,7 +535,7 @@ public sealed class Dispatcher(
                     return RpcResponse.Ok(MsgPack.Ser(new BoolResult { Value = AppSettingsRegistry.GetTurnOffUpdates() }));
                 }
 
-                // ── Dictionary (KitveiHakodesh_dictionary.db) ──────────────────
+                // ── Dictionary (Dictionary.db) ──────────────────
                 case "dictExact":
                     return RpcResponse.Ok(MsgPack.Ser(dictionary.Exact(Term(req.Args))));
 
@@ -491,6 +544,15 @@ public sealed class Dispatcher(
 
                 case "dictContains":
                     return RpcResponse.Ok(MsgPack.Ser(new DictSensesResult { Rows = dictionary.Contains(Term(req.Args)) }));
+
+                case "dictSeforimHeadwords":
+                {
+                    var a = MsgPack.De<DictSeforimHeadwordArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new DictSeforimHeadwordsResult
+                    {
+                        Rows = dictionary.SeforimHeadwords(a.Source ?? "", a.Term ?? "", a.Mode ?? "exact"),
+                    }));
+                }
 
                 case "dictLinks":
                     return RpcResponse.Ok(MsgPack.Ser(new DictLinksResult { Links = dictionary.Links(Term(req.Args)) }));
@@ -527,6 +589,12 @@ public sealed class Dispatcher(
                 {
                     var a = MsgPack.De<LinesPagedArgs>(req.Args);
                     return RpcResponse.Ok(MsgPack.Ser(new LinesResult { Rows = seforim.GetLinesPaged(a.BookId, a.Limit, a.Offset, a.VersionId) }));
+                }
+
+                case "getBookMetadata":
+                {
+                    var a = MsgPack.De<BookMetadataArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new BookMetadataResult { Metadata = seforim.GetBookMetadata(a.BookId) }));
                 }
 
                 case "getBookVersions":
@@ -673,22 +741,26 @@ public sealed class Dispatcher(
                     return RpcResponse.Ok(MsgPack.Ser(new BookIdsResult { Rows = seforim.GetBookIdByExactTitle(a.Title) }));
                 }
 
-                case "getLinesWithContentPatternForBooks":
-                {
-                    var a = MsgPack.De<BoldLinesArgs>(req.Args);
-                    return RpcResponse.Ok(MsgPack.Ser(new BoldLinesResult { Rows = seforim.GetLinesWithContentPatternForBooks(a.BookIds, a.Pattern) }));
-                }
-
-                case "getLinesWithEitherContentPattern":
-                {
-                    var a = MsgPack.De<EitherPatternArgs>(req.Args);
-                    return RpcResponse.Ok(MsgPack.Ser(new RawLinesResult { Rows = seforim.GetLinesWithEitherContentPattern(a.BookId, a.P1, a.P2) }));
-                }
-
                 case "getLineByBookAndLineIndex":
                 {
                     var a = MsgPack.De<LineByIndexArgs>(req.Args);
                     return RpcResponse.Ok(MsgPack.Ser(new RawLinesResult { Rows = seforim.GetLineByBookAndLineIndex(a.BookId, a.LineIndex) }));
+                }
+
+                // ── Error-report provenance ────────────────────────────────────
+                case "getBookSourceName":
+                {
+                    var a = MsgPack.De<BookIdArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new BookSourceNameResult { Rows = seforim.GetBookSourceName(a.BookId) }));
+                }
+
+                case "getLibraryDbVersion":
+                    return RpcResponse.Ok(MsgPack.Ser(new SchemaMetaValueResult { Rows = seforim.GetLibraryDbVersion() }));
+
+                case "getLineRefAndContent":
+                {
+                    var a = MsgPack.De<LineByIndexArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new LineRefResult { Rows = seforim.GetLineRefAndContent(a.BookId, a.LineIndex) }));
                 }
 
                 // ── User settings (highlights/notes) — read + write ────────────
@@ -805,6 +877,27 @@ public sealed class Dispatcher(
             try { lifetime.StopApplication(); }
             catch (Exception ex) { logger.LogError(ex, "restart after DB path change failed"); }
         });
+
+    /// <summary>Core's library switch (validate, carry annotations over, persist), with the
+    /// carry-over outcome logged.</summary>
+    private SeforimDbLibrarySwitcher.SwitchOutcome SwitchLibrary(string path) =>
+        SeforimDbLibrarySwitcher.SwitchTo(
+            path,
+            onCarriedOver: (source, destination) =>
+                logger.LogInformation("Copied user settings {Source} -> {Destination}", source, destination),
+            onCarryOverFailed: ex =>
+                logger.LogWarning(ex, "Could not carry user settings over to the new library"));
+
+    private static UpdateStatusResult ReadUpdateStatus()
+    {
+        var ready = KitveiHakodeshService.KitveiHakodesh.Updater.ReadyInstaller();
+        return new UpdateStatusResult
+        {
+            Ready = ready is not null,
+            Version = ready?.Version ?? "",
+            InstalledVersion = KitveiHakodeshService.KitveiHakodesh.Updater.InstalledVersion() ?? "",
+        };
+    }
 
     private static string Term(byte[]? args) => MsgPack.De<DictTermArgs>(args).Term ?? "";
 

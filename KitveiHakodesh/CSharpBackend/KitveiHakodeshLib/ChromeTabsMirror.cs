@@ -1,5 +1,5 @@
 using FluentChromeTabs;
-using KitveiHakodeshLib.Settings;
+using KitveiHakodesh.Core.Settings;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -58,6 +58,12 @@ namespace KitveiHakodeshLib
             _form.MaximizeToolTip = "הגדל";
             _form.RestoreToolTip = "שחזר";
             _form.CloseToolTip = "סגור";
+
+            // Hebrew tab context-menu captions (the base class defaults are English)
+            _form.CloseTabMenuText = "סגור לשונית זו";
+            _form.CloseOtherTabsMenuText = "סגור את כל הלשוניות האחרות";
+            _form.CloseTabsToTheLeftMenuText = "סגור את כל הלשוניות שמשמאל";
+            _form.CloseTabsToTheRightMenuText = "סגור את כל הלשוניות שמימין";
 
             ApplyPersistedTheme();
 
@@ -303,10 +309,10 @@ namespace KitveiHakodeshLib
 
         private void ApplyPersistedTheme()
             => ApplyTheme(
-                AppSettings.LoadDarkMode(),
-                AppSettings.LoadChromeColor(),
-                AppSettings.LoadAccentColor(),
-                AppSettings.LoadBorderColor());
+                AppSettingsRegistry.GetDarkMode(),
+                AppSettingsRegistry.GetChromeColor(),
+                AppSettingsRegistry.GetAccentColor(),
+                AppSettingsRegistry.GetBorderColor());
 
         private void ApplyTheme(bool isDark, string chromeColorHex, string accentColorHex, string borderColorHex)
         {

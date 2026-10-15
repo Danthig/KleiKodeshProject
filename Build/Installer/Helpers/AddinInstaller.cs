@@ -20,23 +20,16 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
     {
         public const string AppName         = "KleiKodesh";
         public const string AppDisplayName  = "כלי קודש";
-        public const string Version         = "v9.1.2";
+        public const string Version         = "v1.2.1";
         public const string InstallFolderName = "KleiKodesh";
         public const string VstoFileName    = "KleiKodesh.vsto";
 
         /// <summary>
-        /// Which installer variant this binary is — baked in at build time via
-        /// -p:InstallerVariant=x64|x86|AnyCPU (DefineConstants in the csproj).
-        /// Saved to registry by SaveVersion() so the update checker can download
-        /// the same variant on the next update.
+        /// The installer's platform, stamped into HKCU\SOFTWARE\KleiKodesh\InstallerVariant by
+        /// SaveVersion(). Always AnyCPU since 2026-10-11 (the x64 / x86 installers are gone);
+        /// re-stamping it overwrites an older "x64" / "x86" left by a previous install.
         /// </summary>
-#if INSTALLER_VARIANT_X64
-        public const string InstallerVariant = "x64";
-#elif INSTALLER_VARIANT_X86
-        public const string InstallerVariant = "x86";
-#else
         public const string InstallerVariant = "AnyCPU";
-#endif
 
         public static string InstallPath =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), InstallFolderName);
@@ -67,7 +60,7 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
             {
                 try
                 {
-                    string ftsPath = Path.Combine(InstallPath, "FtsIndex");
+                    string ftsPath = Path.Combine(InstallPath, KitveiHakodeshServiceHelper.ServiceFolder, "FtsIndex");
                     if (Directory.Exists(ftsPath))
                     {
                         Directory.Delete(ftsPath, recursive: true);
@@ -89,7 +82,7 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
             var payloadPaths = new System.Collections.Generic.HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
 
-            // The payload is a solid-LZMA archive written next to this exe by the NSIS
+            // The payload is a chunked-LZMA archive written next to this exe by the NSIS
             // wrapper (see PayloadArchive for why it is not a zip). It is strictly
             // sequential: every entry must be consumed in order, and skipped entries
             // still have to be drained out of the stream rather than seeked past.
@@ -98,7 +91,7 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
                 int total = PayloadArchive.ReadHeader(stream);
                 int current = 0;
 
-                using (var body = new LZipStream(stream, CompressionMode.Decompress))
+                using (var body = PayloadArchive.OpenBody(stream))
                 {
                     for (int i = 0; i < total; i++)
                     {
@@ -124,12 +117,12 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
 
                         Directory.CreateDirectory(Path.GetDirectoryName(fullPath));
 
-                        // DocumentLocator.Service.exe may be locked by the running Windows
-                        // service. DocumentLocatorHelper.SendShutdownAsync() was fired at the
+                        // KitveiHakodeshService.exe may be locked by the running Windows
+                        // service. KitveiHakodeshServiceHelper.SendShutdownAsync() was fired at the
                         // start of installation; TryCopyServiceExeAsync() waits for the
                         // remainder of the 1 500 ms exit window, then retries up to 3 times.
                         // On permanent failure the existing file is left in place (silent skip).
-                        if (DocumentLocatorHelper.IsServiceExe(entry.Path))
+                        if (KitveiHakodeshServiceHelper.IsServiceExe(entry.Path))
                         {
                             // Buffer this entry in memory: TryCopyServiceExeAsync seeks back
                             // to the start between retries, and the LZMA body stream cannot
@@ -139,7 +132,7 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
                             {
                                 PayloadArchive.CopyExactly(body, buffer, entry.Length);
                                 buffer.Seek(0, SeekOrigin.Begin);
-                                await DocumentLocatorHelper.TryCopyServiceExeAsync(buffer, fullPath)
+                                await KitveiHakodeshServiceHelper.TryCopyServiceExeAsync(buffer, fullPath)
                                     .ConfigureAwait(false);
                             }
                         }
@@ -183,24 +176,18 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
         /// </summary>
         private static readonly string[] StaleFiles =
         {
-            // The SQLite interop binaries. NOTE these are NOT obsolete: the VSTO still
-            // ships them (KleiKodeshVsto.csproj links x64\ and x86\ SQLite.Interop.dll,
-            // and FtsLib.Net48 uses System.Data.SQLite), so on a normal install the
-            // payloadPaths guard skips every entry below and this list does nothing.
+            // The SQLite interop binaries. The add-in stopped shipping System.Data.SQLite
+            // and SQLite.Interop.dll in 79bb8a98, so these entries now remove leftovers
+            // from older installs. Before that, a stale wrong-architecture interop copy
+            // could win System.Data.SQLite's native probe and throw
+            // EntryPointNotFoundException inside Word.
             //
-            // They are listed for the ONE case the guard lets through: switching
-            // installer variant. An x64 payload ships only x64\SQLite.Interop.dll, so
-            // the x86 copy left by a previous x86 install is not in payloadPaths and
-            // gets deleted here — which is the point. System.Data.SQLite resolves the
-            // native interop by probing, so a stale wrong-architecture copy can win
-            // that probe and throw EntryPointNotFoundException inside Word (this is
-            // what EnvironmentDiagnostics' sqlite.loaded.native.* probe was added to
-            // diagnose).
-            //
-            // The payloadPaths guard in PurgeStaleFiles is therefore load-bearing, not
-            // redundant: without it every install would delete the interop DLL it just
-            // extracted. Do not remove it, and do not "clean up" these entries on the
-            // grounds that the payload still ships them.
+            // The payloadPaths guard in PurgeStaleFiles stays as a general safety net:
+            // a file the current payload itself delivers is never deleted.
+            // The retired DocumentLocatorSvc binary (its registration goes through
+            // LegacyServiceRetirement; the file itself is no longer in the payload).
+            @"DocumentLocator.Service.exe",
+            @"DocumentLocator.Service.pdb",
             @"x64\SQLite.Interop.dll",
             @"x86\SQLite.Interop.dll",
             "SQLite.Interop.dll",
@@ -304,6 +291,16 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
 
             // Bloom filter search index (rebuilt on version mismatch)
             if (normalized.StartsWith("BloomFilters\\", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // The KitveiHakodesh service's indexes and caches: built at runtime, never shipped,
+            // and expensive to rebuild. A reindex happens on a version stamp, not on install.
+            if (normalized.StartsWith("KitveiHakodeshService\\FtsIndex\\", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("KitveiHakodeshService\\CatalogTocIndex\\", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("KitveiHakodeshService\\filesystemindex\\", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("KitveiHakodeshService\\hb-cache\\", StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith("KitveiHakodeshService\\convert-cache\\", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "KitveiHakodeshService\\excluded_folders.json", StringComparison.OrdinalIgnoreCase))
                 return true;
 
             // DocumentLocator NTFS index — runtime-generated, never overwrite on update.

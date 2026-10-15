@@ -40,6 +40,9 @@ namespace KitveiHakodesh.Core.SeforimDb
         /// is recognised as a different format rather than compared as a different database —
         /// see <see cref="IsLegacy"/>.</summary>
         private const string FormatTag = "c1";
+        // NOT bumped for |dbv= and |release= (2026-10-13), on purpose: a bump would make every
+        // existing stamp "legacy" and KEEP those indexes — including ones built before an
+        // Otzaria delta that is already applied. One rebuild for everyone is the safe side.
 
         /// <summary>
         /// Fingerprints <paramref name="databasePath"/>. <paramref name="prefix"/> is prepended
@@ -58,7 +61,7 @@ namespace KitveiHakodesh.Core.SeforimDb
             if (!File.Exists(databasePath)) return head + "missing";
 
             string? content = TryReadContent(databasePath);
-            if (content != null) return head + content;
+            if (content != null) return head + content + ReleaseStamp(databasePath);
 
             try { return head + "len=" + new FileInfo(databasePath).Length; }
             catch (Exception) { return head + "unreadable"; }
@@ -107,26 +110,83 @@ namespace KitveiHakodesh.Core.SeforimDb
                 command.CommandText = "PRAGMA schema_version";
                 object? schemaVersion = command.ExecuteScalar();
 
+                // Which layout this database uses - the content column moved in schema 6.
+                var schema = SeforimDbSchema.Probe(connection);
+
                 // MIN/MAX over an INTEGER PRIMARY KEY are index seeks, not scans.
                 var lines = ReadIdRange(command, "line");
                 var books = ReadIdRange(command, "book");
 
                 // Id ranges alone would miss a database swapped for one with the same ranges
                 // but different text; the last line's length pins the actual rows.
+                //
+                // Read the STORED value's length rather than the decoded text: on a schema-6
+                // database that is the compressed frame's size, which changes with the text
+                // just as faithfully and costs no dictionary load on a path whose whole job is
+                // to touch the database as little as possible. The earlier build threw here
+                // rather than fingerprint a compressed database at all.
                 command.Parameters.Clear();
-                command.CommandText = "SELECT content FROM line WHERE id = $id";
+                command.CommandText = schema.HasSplitLineContent
+                    ? "SELECT length(content) FROM line_content WHERE id = $id"
+                    : "SELECT length(content) FROM line WHERE id = $id";
                 command.Parameters.AddWithValue("$id", lines.Max);
-                object? lastLine = command.ExecuteScalar();
-                int tail = lastLine is string text ? text.Length : -1;
+                object? lastLineLength = command.ExecuteScalar();
+                long tail = lastLineLength is null || lastLineLength is DBNull
+                    ? -1
+                    : Convert.ToInt64(lastLineLength);
 
                 return "schema=" + schemaVersion
                      + "|line=" + lines.Min + ":" + lines.Max
                      + "|book=" + books.Min + ":" + books.Max
-                     + "|tail=" + tail;
+                     + "|tail=" + tail
+                     + "|dbv=" + ReadDbVersion(command);
+            }
+            // Deliberately NOT caught: this catch exists for a database that cannot be read
+            // (locked, corrupt, unexpected schema), where falling back is correct. Compressed
+            // content is a different thing — a database we can read and must not guess about.
+            catch (NotSupportedException)
+            {
+                throw;
             }
             catch (Exception)
             {
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// schema_meta.db_version — bumped by every library update Otzaria applies in place
+        /// (a delta replaces whole books in the middle of the database, which the id ranges and
+        /// the last line usually do not show), and the baseline Zayit's updater reads. Empty when
+        /// the database has no such row.
+        /// </summary>
+        private static string ReadDbVersion(SqliteCommand command)
+        {
+            // Probe for the table rather than catch its absence: a transient BUSY must not read
+            // as "no version" — that would change the stamp and wipe the index for nothing.
+            command.Parameters.Clear();
+            command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'";
+            if (command.ExecuteScalar() == null) return "";
+            command.CommandText = "SELECT value FROM schema_meta WHERE key = 'db_version'";
+            return command.ExecuteScalar()?.ToString() ?? "";
+        }
+
+        /// <summary>
+        /// Zayit's release_info.txt beside the database: the release timestamp its reinstall
+        /// writes. A reinstall can bring a database whose ids and size look like the old one.
+        /// Empty when the file is absent (Otzaria, or no Zayit install).
+        /// </summary>
+        private static string ReleaseStamp(string databasePath)
+        {
+            try
+            {
+                string? folder = Path.GetDirectoryName(databasePath);
+                string path = folder == null ? "" : Path.Combine(folder, "release_info.txt");
+                return File.Exists(path) ? "|release=" + File.ReadAllText(path).Trim() : "";
+            }
+            catch (Exception)
+            {
+                return "";
             }
         }
 

@@ -3,11 +3,14 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
 import { useBookCatalog } from './useBookCatalog'
 import BookCatalogTitleBar from './BookCatalogTitleBar.vue'
-import BookCatalogView from './BookCatalogView.List.vue'
+import BookCatalogViewList from './BookCatalogView.List.vue'
+import BookCatalogViewCards from './BookCatalogView.Cards.vue'
 import BookCatalogSearch from './BookCatalogSearch.vue'
 import LoadingAnimation from '@/components/LoadingAnimation.vue'
 import { usePaneNavigation } from '@/composables/usePaneNavigation'
 import { useTabStore } from '@/stores/tabStore'
+import { useSettingsStore, type BooksView } from '@/stores/settingsStore'
+import { storeToRefs } from 'pinia'
 import type { CategoryNode } from '@/features/book-catalog/bookCatalogTree'
 import type { BookRow } from '@/webview-host/queries.types'
 import type { TocFsItem } from './useBookCatalogSearch'
@@ -28,9 +31,23 @@ const {
   tocSearching,
   load,
   enter,
+  openCategory,
   navigateTo,
   navigateToSibling,
+  ROOT,
 } = useBookCatalog()
+
+// Persisted in settingsStore alongside every other display preference — it is
+// app-wide, not per-tab, so it needs no load-on-mount step.
+const { booksView: view } = storeToRefs(useSettingsStore())
+const activeViewComponent = computed(() =>
+  view.value === 'tiles' ? BookCatalogViewCards : BookCatalogViewList,
+)
+
+function setView(v: BooksView) {
+  // Assigning the store ref persists it — settingsStore watches and writes.
+  view.value = v
+}
 
 // This tab's id, captured at mount. The catalog is NOT a singleton (multiple
 // '/books' tabs can coexist), so we persist against the specific tab, never the
@@ -77,6 +94,18 @@ watch(
   { immediate: true },
 )
 
+// A category to open at, stamped on the tab by a home folder card. One-shot like
+// catalogQuery; re-tried when the catalog finishes loading (ROOT changes), since a
+// cold start stamps it before the categories exist.
+watch(
+  [() => paneNavigation.activeTab.catalogCategoryId, ROOT],
+  ([categoryId]) => {
+    if (categoryId === undefined) return
+    if (openCategory(categoryId)) paneNavigation.updateActiveTab({ catalogCategoryId: undefined })
+  },
+  { immediate: true },
+)
+
 // ── Diagnostics (auto-runs when a bitness-mismatch error is detected) ─────────
 
 const diagData = ref<Record<string, string> | null>(null)
@@ -102,8 +131,9 @@ function copyDiagnostics() {
   void copyTextToClipboard(lines.join('\n'))
 }
 type ActiveViewInstance = ComponentPublicInstance & {
-  /** The list forwards the search input's keys, keeping the caret in the field. */
+  /** Both views forward the search input's keys, keeping the caret in the field. */
   onSearchInputKeydown: (event: KeyboardEvent) => boolean
+  highlightFirst: () => void
 }
 
 const activeViewRef = ref<ActiveViewInstance | null>(null)
@@ -122,7 +152,12 @@ function onSearchKeydown(event: KeyboardEvent) {
   }
 
   const list = isSearching.value ? searchResultsRef.value : activeViewRef.value
-  if (list?.onSearchInputKeydown?.(event)) return
+  const pathBefore = path.value
+  if (list?.onSearchInputKeydown?.(event)) {
+    // A keyboard drill-down lands on the first item, so the arrows work at once.
+    if (path.value !== pathBefore) highlightFirstAfterRender()
+    return
+  }
 
   // An Enter the list did not consume (nothing highlighted) falls through to the
   // single-result shortcut.
@@ -130,6 +165,10 @@ function onSearchKeydown(event: KeyboardEvent) {
     onSearchEnter()
     return
   }
+}
+
+function highlightFirstAfterRender() {
+  void nextTick(() => activeViewRef.value?.highlightFirst())
 }
 
 const PLACEHOLDERS = ['בראשית פרק ד', 'בבלי ברכות דף יד', 'רמב"ם משנה תורה']
@@ -258,8 +297,10 @@ function onSearchEnter() {
 <template>
   <div class="books-page">
     <BookCatalogTitleBar
+      :view="view"
       :path="path"
       :show-search="showSearch"
+      @set-view="setView"
       @navigate="onNavigate"
       @navigate-to-sibling="onNavigateToSibling($event.atIndex, $event.node)"
       @open-search="openSearch"
@@ -315,7 +356,8 @@ function onSearchEnter() {
         </template>
       </div>
       <template v-else>
-        <BookCatalogView
+        <component
+          :is="activeViewComponent"
           ref="activeViewRef"
           v-show="!isSearching"
           :items="treeItems"
@@ -330,6 +372,7 @@ function onSearchEnter() {
             ref="searchResultsRef"
             v-else
             :items="searchItems"
+            :view="view"
             :searching="tocSearching"
             @select-book="onSelectBook"
             @select-toc="onSelectToc"

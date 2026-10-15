@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using KitveiHakodeshService.SeforimDb;
 
+
 namespace KitveiHakodeshService.Ipc;
 
 // ── Clean semantic RPC envelope ────────────────────────────────────────────────
@@ -204,30 +205,15 @@ public sealed class DbPathResult
     public string Path { get; set; } = "";
     public bool IsCustom { get; set; }
     public bool Exists { get; set; }
+    /// <summary><c>getSeforimDbPath</c> only: an Otzaria update of the database stopped
+    /// half-way (its hot -journal or .applying marker is still beside the file), so every
+    /// read-only query fails until Otzaria is opened and finishes it.</summary>
+    public bool UpdateInterrupted { get; set; }
     public bool Restarting { get; set; }
     /// <summary><c>pickSeforimDbPath</c> only: the user dismissed the native dialog, so
     /// nothing was persisted and the caller must leave the current path as-is.</summary>
     public bool Cancelled { get; set; }
     public string? Error { get; set; }
-}
-
-/// <summary>A single file-system hit, in the exact shape the Vue app already consumes.</summary>
-[MessagePack.MessagePackObject(keyAsPropertyName: true)]
-public sealed class FileHit
-{
-    public string FileName  { get; set; } = "";
-    public string Path      { get; set; } = "";
-    public long   ModifiedDate { get; set; }
-    /// <summary>Non-empty only for Otzaria addin entry-point files. "תוסף אוצריא: {name}".</summary>
-    public string AddinName { get; set; } = "";
-}
-
-/// <summary>Result payload for <c>locateDocuments</c>.</summary>
-[MessagePack.MessagePackObject(keyAsPropertyName: true)]
-public sealed class LocateDocumentsResult
-{
-    public List<FileHit> Results { get; set; } = new();
-    public int Total { get; set; }
 }
 
 /// <summary>Args for the <c>hbSearch</c> op (HebrewBooks catalog search).</summary>
@@ -239,20 +225,10 @@ public sealed class HbSearchArgs
     public int Limit { get; set; }
 }
 
-/// <summary>A HebrewBooks catalog row, in the exact shape the Vue app consumes
-/// (see hebrewBooksCatalog.ts HebrewBook).</summary>
-[MessagePack.MessagePackObject(keyAsPropertyName: true)]
-public sealed class HebrewBook
-{
-    public int Id { get; set; }
-    public string Title { get; set; } = "";
-    public string Author { get; set; } = "";
-    public string PrintingPlace { get; set; } = "";
-    public string PrintingYear { get; set; } = "";
-    public int? Pages { get; set; }
-    public string Categories { get; set; } = "";
-    public bool HasLocalFile { get; set; }
-}
+// A HebrewBooks catalog row is KitveiHakodesh.Core.HebrewBooks.HebrewBook — see the alias at
+// the top of this file. Core's type carries the same keyAsPropertyName MessagePack contract and
+// the same field names, so the bytes the Vue app receives are unchanged (hebrewBooksCatalog.ts
+// HebrewBook). The mirror that used to sit here was a duplicate, not a transport envelope.
 
 /// <summary>Result payload for <c>hbSearch</c>.</summary>
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
@@ -280,6 +256,10 @@ public sealed class HbDownloadArgs
 public sealed class HbDownloadResult
 {
     public string Handle { get; set; } = "";
+    /// <summary>The PDF's path on disk, set whenever <see cref="Handle"/> is. The dev page loads
+    /// the file through <c>GET /file/{Handle}</c>; the hosted page has no HTTP host and asks its
+    /// WebView2 host to serve this path from a virtual host instead.</summary>
+    public string Path { get; set; } = "";
     public bool NotFound { get; set; }
     public bool NoInternet { get; set; }
     public bool Redownload { get; set; }
@@ -353,6 +333,27 @@ public sealed class StringResult
     public string Value { get; set; } = "";
 }
 
+/// <summary>Result of <c>getUpdateStatus</c> / <c>checkForUpdateNow</c>: whether a newer release
+/// is downloaded and ready to install, and the version installed now.</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class UpdateStatusResult
+{
+    public bool Ready { get; set; }
+    public string Version { get; set; } = "";
+    /// <summary>The installer's stamp; "" when this is not an installed copy.</summary>
+    public string InstalledVersion { get; set; } = "";
+    /// <summary><c>checkForUpdateNow</c> only: why the check could not run or failed; "" when it ran.</summary>
+    public string CheckError { get; set; } = "";
+}
+
+/// <summary>Args for <c>registerOwner</c> / <c>releaseOwner</c>: a host process using this console
+/// instance (see Http/OwnerWatcher).</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class OwnerArgs
+{
+    public int Pid { get; set; }
+}
+
 /// <summary>Generic single-bool arg (e.g. <c>setTurnOffUpdates</c>).</summary>
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class BoolArg
@@ -367,7 +368,7 @@ public sealed class BoolResult
     public bool Value { get; set; }
 }
 
-// ── Dictionary (KitveiHakodesh_dictionary.db) ──────────────────────────────────
+// ── Dictionary (Dictionary.db) ──────────────────────────────────
 
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class DictTermArgs
@@ -428,6 +429,23 @@ public sealed class DictWordsResult
     public List<string> Words { get; set; } = new();
 }
 
+/// <summary>Args for <c>dictSeforimHeadwords</c>: one seforim.db reference work
+/// (metzudat/malbim/menachem/aruch/micropedia), the term, and the tier
+/// ("exact" | "prefix" | "contains").</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class DictSeforimHeadwordArgs
+{
+    public string? Source { get; set; }
+    public string? Term { get; set; }
+    public string? Mode { get; set; }
+}
+
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class DictSeforimHeadwordsResult
+{
+    public List<global::KitveiHakodesh.Core.Dictionary.SeforimHeadwordPointer> Rows { get; set; } = new();
+}
+
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class DictLinksResult
 {
@@ -476,6 +494,8 @@ internal static class RpcResponse
 [JsonSerializable(typeof(DictAbbrevResult))]
 [JsonSerializable(typeof(DictWordsResult))]
 [JsonSerializable(typeof(DictLinksResult))]
+[JsonSerializable(typeof(DictSeforimHeadwordArgs))]
+[JsonSerializable(typeof(DictSeforimHeadwordsResult))]
 [JsonSerializable(typeof(CategoryRow))]
 [JsonSerializable(typeof(BookRow))]
 [JsonSerializable(typeof(CategoriesResult))]
@@ -544,10 +564,6 @@ internal static class RpcResponse
 [JsonSerializable(typeof(ExactTitleArgs))]
 [JsonSerializable(typeof(BookIdRow))]
 [JsonSerializable(typeof(BookIdsResult))]
-[JsonSerializable(typeof(BoldLinesArgs))]
-[JsonSerializable(typeof(BoldLineRow))]
-[JsonSerializable(typeof(BoldLinesResult))]
-[JsonSerializable(typeof(EitherPatternArgs))]
 [JsonSerializable(typeof(LineByIndexArgs))]
 [JsonSerializable(typeof(RawLineRow))]
 [JsonSerializable(typeof(RawLinesResult))]

@@ -4,17 +4,21 @@
    Shipped in public/fonts/ so the reading defaults do not depend on what the
    machine happens to have installed.
 
-   Every Hebrew face here carries the cantillation marks (U+0591-05AF) that books
-   flagged hasTeamim need — verified against each cmap, 31/31 marks. That is the
-   bar for being bundled at all: a body face without te'amim renders such books
-   broken, so there is no longer one that lacks them. Heebo is the single
-   exception and is headings-only, never a body or teamim font.
+   Culmus fonts (Taamey Frank CLM, Hadasim CLM, Simple CLM, Stam Ashkenaz CLM,
+   Stam Sefarad CLM) carry GPL-2.0 WITH the font-embedding exception.
+   LICENSE-CulmusCLM.txt covers them.
 
-   Licensing decides which Culmus families ship. These four carry GPL-2.0 WITH
-   the font-embedding exception, which is what keeps the app's own code clear of
-   the GPL. Frank Ruehl CLM, Nachlieli CLM, Miriam Mono CLM and Drugulin CLM have
-   te'amim too but are plain GPL-2.0 with NO exception — do not add them. See
-   LICENSE-CulmusCLM.txt. */
+   Frank Ruehl Libre is a permissively-licensed OFL-1.1 revival of the classic
+   Frank Ruehl typeface. All weights are included (Light, Regular, Medium,
+   SemiBold, Bold, ExtraBold, Black).
+
+   Noto Rashi Hebrew is an OFL-1.1 semi-cursive font based on 15th-century
+   Sephardic writing, designed for religious commentary. All weights are
+   included (Thin through Black).
+
+   Heebo is an OFL-1.1 variable font used for headings. */
+
+/* Taamey Frank CLM – all available weights */
 @font-face {
   font-family: 'Taamey Frank CLM';
   src: url('/fonts/TaameyFrankCLM-Regular.woff2') format('woff2');
@@ -29,8 +33,8 @@
   font-style: normal;
   font-display: swap;
 }
-/* The oblique faces are declared so the browser picks the real drawn slant instead
-   of shearing the upright face itself. */
+
+/* Hadasim CLM – regular, bold, and oblique variants */
 @font-face {
   font-family: 'Hadasim CLM';
   src: url('/fonts/HadasimCLM-Regular.woff2') format('woff2');
@@ -59,7 +63,8 @@
   font-style: oblique;
   font-display: swap;
 }
-/* Simple CLM ships a full Latin set, which is why it is the largest of the four. */
+
+/* Simple CLM – medium, bold, and oblique variants */
 @font-face {
   font-family: 'Simple CLM';
   src: url('/fonts/SimpleCLM-Medium.woff2') format('woff2');
@@ -88,7 +93,8 @@
   font-style: oblique;
   font-display: swap;
 }
-/* Scribal faces — one weight each, as the script has no bold form. */
+
+/* Stam Ashkenaz CLM – scribal face, single weight */
 @font-face {
   font-family: 'Stam Ashkenaz CLM';
   src: url('/fonts/StamAshkenazCLM.woff2') format('woff2');
@@ -96,6 +102,8 @@
   font-style: normal;
   font-display: swap;
 }
+
+/* Stam Sefarad CLM – scribal face, single weight */
 @font-face {
   font-family: 'Stam Sefarad CLM';
   src: url('/fonts/StamSefaradCLM.woff2') format('woff2');
@@ -103,13 +111,128 @@
   font-style: normal;
   font-display: swap;
 }
-/* Headings. A sans face against the serif body, bundled because the previous
-   default (Segoe UI) exists only on Windows. OFL-1.1. Variable: one file covers
-   the whole weight range, so the range is declared rather than a file per weight. */
+
+/* Frank Ruehl Libre – all available weights */
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Frank Ruehl Libre';
+  src: url('/fonts/FrankRuhlLibre-Black.woff2') format('woff2');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Heebo – variable font, headings only */
 @font-face {
   font-family: 'Heebo';
   src: url('/fonts/Heebo-var.woff2') format('woff2-variations');
   font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Noto Rashi Hebrew – all available weights */
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-Thin.woff2') format('woff2');
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-ExtraLight.woff2') format('woff2');
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Noto Rashi Hebrew';
+  src: url('/fonts/NotoRashiHebrew-Black.woff2') format('woff2');
+  font-weight: 900;
   font-style: normal;
   font-display: swap;
 }
@@ -128,25 +251,25 @@
    prefix — driven by the toolbar's marker dropdown. The markers hold no text
    content (label is a ::before), so hiding them cannot shift annotation offsets.
 
-   Per-commentary marker slots. Each marker's data-wl-c is its commentary's rank
-   within the source book, ascending by book id (buildWordLinkTreatments in
-   wordLinkAnchors.ts) — the smaller the book id, the SIMPLER the treatment. Hue
-   alone is indistinguishable at superscript size, so the ladder climbs through
-   typography first (unforgeable by any text label) and reaches enclosures last:
-   plain → underline → bold → bold underline → enclosure 1 → enclosure 2 → their
-   bold variants. Enclosure glyphs are deliberately NOT defined here: they are
-   chosen at runtime per book — never a glyph the book's own printed signs use —
-   and travel as inline custom properties from the splicer. Without them, slots
-   4-7 degrade to color/weight only. Labels that carry their own sign render
-   verbatim and get no slot at all (labelCarriesOwnSign). */
-.word-link-marker[data-wl-c='0'] { --wl-marker-color: #b8605c; }
-.word-link-marker[data-wl-c='1'] { --wl-marker-color: #5a82b8; --wl-marker-decoration: underline; }
-.word-link-marker[data-wl-c='2'] { --wl-marker-color: #5d9061; --wl-marker-weight: 700; }
-.word-link-marker[data-wl-c='3'] { --wl-marker-color: #b0813f; --wl-marker-weight: 700; --wl-marker-decoration: underline; }
-.word-link-marker[data-wl-c='4'] { --wl-marker-color: #8a6fb0; }
-.word-link-marker[data-wl-c='5'] { --wl-marker-color: #4a9494; }
-.word-link-marker[data-wl-c='6'] { --wl-marker-color: #b06a92; --wl-marker-weight: 700; }
-.word-link-marker[data-wl-c='7'] { --wl-marker-color: #8a8a4d; --wl-marker-weight: 700; }
+/* Word-link point markers (superscript letter marks spliced by wordLinkAnchors.ts).
+   Per-commentary visibility is a stylesheet injected by settingsStore — one
+   display:none rule per hidden commentary book, keyed on the marker's data-wl
+   prefix — driven by the toolbar's marker dropdown. The markers hold no text
+   content (label is a ::before), so hiding them cannot shift annotation offsets.
+
+   Per-commentary marker treatments: plain, underlined, then enclosures with glyphs.
+   All use the same color (--text-secondary) and font-weight 300 (Heebo Light). Custom
+   delimiters (labels with their own signs) get no treatment — they're clear on their
+   own. Delimiters already present in the book's labels are excluded from the enclosure
+   pool, so an app-assigned wrapper can never imitate a sign the source edition uses. */
+.word-link-marker[data-wl-c='0'] { --wl-marker-weight: 300; }
+.word-link-marker[data-wl-c='1'] { --wl-marker-weight: 300; --wl-marker-decoration: underline; }
+.word-link-marker[data-wl-c='2'] { --wl-marker-weight: 300; }
+.word-link-marker[data-wl-c='3'] { --wl-marker-weight: 300; }
+.word-link-marker[data-wl-c='4'] { --wl-marker-weight: 300; }
+.word-link-marker[data-wl-c='5'] { --wl-marker-weight: 300; }
+.word-link-marker[data-wl-c='6'] { --wl-marker-weight: 300; }
+.word-link-marker[data-wl-c='7'] { --wl-marker-weight: 300; }
 
 /* Adjacent markers (different commentaries anchored at the same words) get a gap
    so they never fuse into one blob. */

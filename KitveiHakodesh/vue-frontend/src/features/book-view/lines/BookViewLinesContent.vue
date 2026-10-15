@@ -12,12 +12,20 @@ import type { BookViewLinesScrollProps } from './useBookViewLinesScroll'
 import ContextMenu from '@/components/ContextMenu.vue'
 import { useContextMenuLongPress, hasActiveTextSelection } from '@/composables/useContextMenuLongPress'
 import { useScopedKeys } from '../useTextSelectionKeys'
+import { useVirtualizedTextSelection } from '@/composables/useVirtualizedTextSelection'
 import { useScopedCopy, triggerCopy } from '@/composables/useLineCopy'
 import { useVirtualScrollerKeys } from '@/composables/useVirtualScrollerKeys'
 import { useZoomHandler } from '@/composables/useZoom'
-import { useBookViewLineRenderer, setCurrentMark } from './useBookViewLineRenderer'
+import {
+  useBookViewLineRenderer,
+  setCurrentMark,
+  annotationOffsetLength,
+  contentInAnnotationOffsetSpace,
+} from './useBookViewLineRenderer'
 import { useBookViewLineCopyMenu } from './useBookViewLineCopyMenu'
 import { useBookViewLineLink } from './useBookViewLineLink'
+import BookViewErrorReportDialog from '../errorReport/BookViewErrorReportDialog.vue'
+import { useBookViewErrorReport } from '../errorReport/useBookViewErrorReport'
 import { useBookViewAnnotations } from './useBookViewAnnotations'
 import { useBookViewLinesScroll } from './useBookViewLinesScroll'
 import { useBookViewLinesNavigation } from './useBookViewLinesNavigation'
@@ -27,10 +35,13 @@ import { useBookViewAbbrevTooltip } from './useBookViewAbbrevTooltip'
 import WordLinkTooltip from './WordLinkTooltip.vue'
 import { useWordLinkTooltip } from './useWordLinkTooltip'
 import { useNoteTooltip } from './useNoteTooltip'
+import BookViewScrollbarTocTooltip from './BookViewScrollbarTocTooltip.vue'
+import { useBookViewScrollbarTocTooltip } from './useBookViewScrollbarTocTooltip'
 import { useWordLinkAnchors } from './useWordLinkAnchors'
 import { useCopyExportData } from './useCopyExportData'
 import { useBooksDataStore } from '@/stores/booksDataStore'
 import { pasteIntoWord } from '@/webview-host/bridge'
+import { showToast } from '@/composables/useToast'
 
 const emit = defineEmits<{
   scrolled: [firstVisible: number, firstFull: number, isUserScroll: boolean]
@@ -95,12 +106,26 @@ const { isSelectAll, selectAllInContainer } = useScopedKeys(scrollerEl, {
   onCtrlShiftC: () => onSearchInRepository(),
 })
 
+// Keeps the rows holding a selection's two ends mounted however far they scroll
+// away, so a drag past the viewport edge cannot break the selection.
+const {
+  rangeExtractor: selectionRangeExtractor,
+  selectedRowIndexRange,
+  restoreSelectionFromPinnedRows,
+} = useVirtualizedTextSelection(
+  scrollerEl,
+  // The version overlay keeps the line ids and the count but replaces every line's
+  // text, so the count alone would not notice it.
+  () => `${props.activeVersionId ?? 0}:${props.lines.length}`,
+)
+
 const virtualizer = useVirtualizer(
   computed(() => ({
     count: props.lines.length,
     getScrollElement: () => scrollerEl.value,
     estimateSize: () => 32,
     overscan: 10,
+    rangeExtractor: selectionRangeExtractor.value,
   })),
 )
 const virtualItems = computed(() => virtualizer.value.getVirtualItems())
@@ -135,6 +160,14 @@ const {
   scrollerEl,
   () => props.lines,
   () => virtualItems.value.map((v) => props.lines[v.index]?.id ?? 0).filter((id) => id > 0),
+  restoreSelectionFromPinnedRows,
+  selectedRowIndexRange,
+  // Measured in the annotation offset space — after the diacritics and censor
+  // transforms, which is the text the highlight walk addresses.
+  (content) =>
+    annotationOffsetLength(
+      contentInAnnotationOffsetSpace(content, diacriticsState.value, settingsStore.censorOptions),
+    ),
 )
 
 const { suppressPositionSave, onScroll, captureScrollPos, readCurrentPosition, cancelRestoreCorrection } =
@@ -181,7 +214,19 @@ watch(
 )
 
 const contextMenuRef = ref<InstanceType<typeof ContextMenu> | null>(null)
-const { copyLineLink } = useBookViewLineLink({ scrollerEl, lines: () => props.lines, bookId })
+const { copyLineLink, pressedLineIndex } = useBookViewLineLink({ scrollerEl, lines: () => props.lines, bookId })
+const {
+  target: errorReportTarget,
+  openErrorReport,
+  closeErrorReport,
+  awaitSourceResolution: awaitErrorReportSource,
+} = useBookViewErrorReport({
+  lines: () => props.lines,
+  pressedLineIndex,
+  scrollerEl,
+  bookId,
+  activeVersionId: () => props.activeVersionId ?? null,
+})
 const booksDataStore = useBooksDataStore()
 // What copy-with-notes needs beyond the rendered markup: the notes and citations of
 // lines that were never scrolled into view, plus the target lines those citations
@@ -192,11 +237,12 @@ const { prepareForLines, prepareForRenderedHtml, resolveWordLinkTarget } = useCo
   getWordLinkAnchorsForLine,
   getBookTitle: (targetBookId) => booksDataStore.allBooksMap.get(targetBookId)?.title ?? '',
 })
-const { items: contextMenuItems, buildFormattedHtml, onCopy, onPasteIntoWord, onSearchInRepository } = useBookViewLineCopyMenu({
+const { items: contextMenuItems, buildFormattedHtml, onCopy, onPasteIntoWord, onSearchInRepository, buildSource } = useBookViewLineCopyMenu({
   scrollerEl,
   lines: () => props.lines,
   isSelectAll,
   selectAllInContainer,
+  selectedRowIndexRange,
   bookTitle,
   bookId,
   tabStore,
@@ -209,6 +255,7 @@ const { items: contextMenuItems, buildFormattedHtml, onCopy, onPasteIntoWord, on
   onClearHighlight,
   onAddNote,
   onCopyLineLink: copyLineLink,
+  onReportError: openErrorReport,
   prepareForLines,
   prepareForRenderedHtml,
   resolveWordLinkTarget,
@@ -237,6 +284,15 @@ const { abbrevTooltip } = useBookViewAbbrevTooltip(scrollerEl)
 // User-note hover preview — the marker carries its text in data-note-text, so this
 // replaces the native title tooltip the marker used to have.
 const { noteTooltip, closeNoteTooltip } = useNoteTooltip(scrollerEl)
+
+// Hovering the scrollbar shows the reader's current book and TOC path — reaching
+// for the scrollbar is when "where am I?" gets asked.
+const { scrollbarTocTooltip, refreshScrollbarTocTooltip } = useBookViewScrollbarTocTooltip(scrollerEl, {
+  getCurrentLineIndex: () => readCurrentPosition()?.lineIndex ?? null,
+  getBookTitle: () => bookTitle,
+  getActiveTocEntry: () => props.getActiveTocEntry,
+  getTocPath: () => props.getTocPath,
+})
 
 const {
   wordLinkTooltip,
@@ -319,12 +375,42 @@ onMounted(() => {
   })
 })
 
-defineExpose({ scrollToLine, scrollToLineId, focusScroller, captureScrollPos, readCurrentPosition })
+// Toolbar export to Word: the custom copy + paste-into-Word path, over the whole book
+// (as if the user had pressed Ctrl+A first) rather than writing a new document.
+//
+// Unlike Ctrl+C, the notes warm-up is awaited IN FULL, so a cold book cannot lose
+// endnotes. If that outlasts the click's clipboard activation, execCommand('copy')
+// does nothing — the warm-up is cached by then, so a second click goes through
+// instantly; the toast says so. The select-all is dropped afterwards either way.
+async function pasteAllIntoWord(): Promise<void> {
+  selectAllInContainer()
+  if (settingsStore.copyWithNotes) {
+    try { await prepareForLines(props.lines.map((l) => l.id)) } catch { /* export degrades; proceed */ }
+  }
+  const copied = triggerCopy(() => pasteIntoWord().catch(() => {}))
+  window.getSelection()?.removeAllRanges()
+  if (!copied) showToast('ההכנה לייצוא הסתיימה — לחץ שוב על ייצוא ל-Word')
+}
+
+defineExpose({ pasteAllIntoWord, scrollToLine, scrollToLineId, focusScroller, captureScrollPos, readCurrentPosition })
 </script>
 
 <template>
   <div class="lines-content">
     <ContextMenu ref="contextMenuRef" :items="contextMenuItems" />
+    <BookViewErrorReportDialog
+      v-if="errorReportTarget"
+      :selected-text="errorReportTarget.selectedText"
+      :original-line="errorReportTarget.originalLine"
+      :selection-offset="errorReportTarget.selectionOffset"
+      :book-title="bookTitle"
+      :current-ref="buildSource(errorReportTarget.lineIndex >= 0 ? errorReportTarget.lineIndex : null)"
+      :line-index="errorReportTarget.lineIndex"
+      :book-id="bookId"
+      :source="errorReportTarget.source"
+      :await-source="awaitErrorReportSource"
+      @close="closeErrorReport"
+    />
     <BookViewNoteBubble
       v-if="activeBubbleNote && activeBubbleAnchorRect"
       :note="activeBubbleNote"
@@ -355,6 +441,7 @@ defineExpose({ scrollToLine, scrollToLineId, focusScroller, captureScrollPos, re
       :interactive="false"
       @close="closeNoteTooltip"
     />
+    <BookViewScrollbarTocTooltip v-if="scrollbarTocTooltip" :data="scrollbarTocTooltip" />
     <div
       ref="scrollerEl"
       class="scroller"
@@ -362,7 +449,7 @@ defineExpose({ scrollToLine, scrollToLineId, focusScroller, captureScrollPos, re
       data-ctrlf-enabled
       :style="{ fontSize: `${fontPx}px` }"
       :data-teamim="bookHasTeamim ? 'true' : 'false'"
-      @scroll="onScroll"
+      @scroll="onScroll(); refreshScrollbarTocTooltip()"
       @click="onMarkerClick"
       @contextmenu="contextMenuRef?.show($event)"
     >
@@ -530,9 +617,9 @@ html[data-fixed-line-height='true'] .line :deep(.word-link-marker) {
   opacity: 0.35;
   padding-block-end: 2px;
 }
-/* Headings stay heavier than the body at EVERY slider stop, instead of inheriting
-   its weight. 800 rather than bold(700): the weight slider tops out at 700, so a
-   700 pin would render headings identically to a maxed-out body. */
+/* Headings are always 200 units heavier than the body so they stay visually
+   distinct at every slider stop. calc() is clamped to 100–900 by the browser;
+   the slider tops out at 700, so the maximum produced here is 900. */
 .line :deep(h1),
 .line :deep(h2),
 .line :deep(h3),
@@ -540,7 +627,7 @@ html[data-fixed-line-height='true'] .line :deep(.word-link-marker) {
 .line :deep(h5),
 .line :deep(h6) {
   font-family: var(--header-font);
-  font-weight: 800;
+  font-weight: calc(var(--font-weight, 400) + 300);
 }
 .line :deep(mark.search-match) {
   background: rgba(255, 165, 0, 0.4);
@@ -582,11 +669,10 @@ html[data-fixed-line-height='true'] .line :deep(.word-link-marker) {
 .line :deep(.word-link:hover) {
   text-decoration-color: currentColor;
 }
-/* Colored per commentary via --wl-marker-color (palette in main.css), muted by
-   opacity so the marks don't compete with the text; hover restores the affordance. */
+/* Muted by opacity so the marks don't compete with the text; hover restores the
+   affordance. All markers share the same color (--text-secondary fallback). */
 .line :deep(.word-link-marker) {
-  font-size: 0.72em;
-  vertical-align: super;
+  font-size: 0.6em;
   line-height: 1;
   color: var(--wl-marker-color, var(--text-secondary));
   opacity: 0.65;

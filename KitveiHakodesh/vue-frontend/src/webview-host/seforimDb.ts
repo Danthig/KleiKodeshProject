@@ -11,19 +11,29 @@ import { ref } from 'vue'
  * took the hosted path in dev. That produced real bugs three times over (paste into Word,
  * export to Word, font detection).
  *
- * Remember the architecture it selects between: hosted does NOT use the KitveiHakodesh service —
- * KitveiHakodeshLib owns the data and the native calls there. Only dev goes through the service.
+ * Both runtimes read their data from the KitveiHakodesh service (serviceClient.ts); what
+ * this flag selects is who hosts the page: WebView2 with its native features, or a browser.
  */
 export const hasHostBridge = typeof window !== 'undefined' && typeof window.__webviewAction === 'function'
 
 /**
- * Whether the seforim DB is available.
- *
- * Hosted: the C# host injects __webviewDbReady (false when the user skipped DB setup).
- * Dev: always true — the service resolves and owns the DB; SetupWizard asks it separately
- * (getDbPathInfo) whether the file actually exists on disk.
+ * Whether the seforim DB is available. Optimistically true at startup so first paint is
+ * not held back by a round-trip; `probeDbReady` (called from main.ts) asks the service
+ * whether the resolved file actually exists on disk and corrects it.
  */
-export const dbReady = ref(typeof window !== 'undefined' ? (window.__webviewDbReady ?? true) : true)
+export const dbReady = ref(true)
+
+/** Ask the service whether the resolved seforim DB exists; updates `dbReady`. */
+export async function probeDbReady(): Promise<boolean> {
+  try {
+    const { serviceCall } = await import('./serviceClient')
+    const info = await serviceCall<{ path: string; exists: boolean }>('getSeforimDbPath')
+    dbReady.value = !!info?.exists
+  } catch {
+    /* service unreachable — leave the optimistic value; the data calls will report it */
+  }
+  return dbReady.value
+}
 
 /** True once detected; false means the column doesn't exist or detection hasn't run yet. */
 export let categoryHasOrderIndex = false
@@ -37,63 +47,52 @@ export let categoryHasOrderIndex = false
  */
 export let declaredBaseColumn = 'isDeclaredBase'
 
+/**
+ * True when line text lives in the `line_content` sidecar and `line` itself has no
+ * `content` column - SeforimLibrary schema 6 and later.
+ *
+ * This decides the SHAPE of every query that reads line text, not merely how a value is
+ * read: on such a database `SELECT content FROM line` fails outright with "no such
+ * column". The queries in queries.sql.ts take this flag and join the sidecar instead.
+ *
+ * False by default, which is the older layout, and the probe below upgrades it.
+ */
+export let hasSplitLineContent = false
+
 let _schemaDetected = false
 let _schemaDetecting: Promise<void> | null = null
 
-/** Lazy — only runs on first call. Safe to call multiple times. */
+/**
+ * Kept as a no-op so callers need not care which runtime they are in.
+ *
+ * It used to run three PRAGMA table_info round-trips at startup to decide which spelling of
+ * the hosted SQL to use — whether `category` has orderIndex, which column flags a declared
+ * base text, whether line content moved to a sidecar. C# answers all three from its own
+ * schema probe now, on both legs, so the page has nothing to detect.
+ */
 export function ensureCategorySchema(): Promise<void> {
-  if (_schemaDetected) return Promise.resolve()
-  // Dev routes the catalog through the service, which detects the orderIndex column
-  // itself — categoryHasOrderIndex is only consulted on the hosted (C#) SQL path.
-  if (typeof window.__webviewQuery !== 'function') {
-    _schemaDetected = true
-    return Promise.resolve()
-  }
-  if (_schemaDetecting) return _schemaDetecting
-  _schemaDetecting = Promise.all([
-    query<{ name: string }>('PRAGMA table_info(category)', []),
-    query<{ name: string }>('PRAGMA table_info(link)', []),
-  ])
-    .then(([categoryCols, linkCols]) => {
-      categoryHasOrderIndex = categoryCols.some((c) => c.name === 'orderIndex')
-      if (linkCols.some((c) => c.name === 'baseProvenance')) declaredBaseColumn = 'baseProvenance'
-      _schemaDetected = true
-    })
-    .catch(() => {
-      // Schema detection failed — proceed with the safe default (no orderIndex)
-      categoryHasOrderIndex = false
-      _schemaDetected = true
-    })
-    .finally(() => {
-      _schemaDetecting = null
-    })
-  return _schemaDetecting
+  return Promise.resolve()
 }
 
-export async function onDbReady(path: string) {
-  // A DIFFERENT library means every stored book id now points somewhere else, so the
-  // recent books and the rest of the book-id-keyed state are dropped before the
-  // reload — see webview-host/dbSwitchCleanup. Compared against the path we are
-  // leaving, so first-ever setup (no previous path) and re-picking the same folder
-  // both keep the reader's history.
-  const previousPath = window.__webviewDbPath
-  const isSwitch = !!previousPath && previousPath !== path
-  window.__webviewDbPath = path
+/**
+ * After the service accepted a new seforim DB path (pick, typed, or reset to default).
+ *
+ * A DIFFERENT library means every stored book id now points somewhere else, so the recent
+ * books and the rest of the book-id-keyed state are dropped before the reload — see
+ * webview-host/dbSwitchCleanup. Compared against the path being left, so first-ever setup
+ * (no previous path) and re-picking the same folder both keep the reader's history.
+ *
+ * The service restarts itself on the new DB; the reload makes every store refetch from
+ * it, and the service client rides out the restart.
+ */
+export async function onDbPathChanged(previousPath: string, newPath: string) {
   dbReady.value = true
-  // Awaited, not fire-and-forget: the reload below is what makes the surviving stores
-  // refetch, and reloading mid-wipe would leave some of the stale data behind.
-  if (isSwitch) {
+  // Awaited, not fire-and-forget: reloading mid-wipe would leave stale data behind.
+  if (previousPath && previousPath !== newPath) {
     const { clearStaleBookData } = await import('./dbSwitchCleanup')
     await clearStaleBookData()
   }
-  // Ask C# to reload via its HandleReload() method, which re-reads the saved path from
-  // the registry, updates the __webviewDbReady injection script, then navigates.
-  // window.location.reload() bypasses that and would re-inject the old "false" value.
-  if (typeof window.__webviewAction === 'function') {
-    window.__webviewAction('reload').catch(() => window.location.reload())
-  } else {
-    window.location.reload()
-  }
+  setTimeout(() => window.location.reload(), 800)
 }
 
 // ── Push event bus ────────────────────────────────────────────────────────────
@@ -125,27 +124,4 @@ if (typeof window !== 'undefined' && hasHostBridge) {
   window.__onWebviewEvent = (msg) => {
     for (const fn of _listeners) fn(msg)
   }
-  onWebviewEvent((msg) => {
-    if (msg.event === 'dbPathPicked') {
-      // A push has nobody to return the promise to; onDbReady contains its own
-      // failures, so this only keeps an unexpected rejection out of the console.
-      void onDbReady(msg.path as string).catch(() => {})
-    }
-    // C# pushes the FULL exception (type + stack) of any failure in the DB path
-    // flow here. Nothing used to listen, so a failed pick was invisible — log it
-    // so an affected user's F12 console names the exact failing step.
-    if (msg.event === 'dbOpenError') {
-      console.error('[seforimDb] DB path change failed (dbOpenError):\n' + String(msg.error ?? ''))
-    }
-  })
-}
-
-export async function query<T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> {
-  if (typeof window.__webviewQuery === 'function') {
-    return (await window.__webviewQuery(sql, params)).rows as T[]
-  }
-  // In the hosted environment without a DB (user skipped setup), return empty results.
-  if (hasHostBridge && !dbReady.value) return []
-  // Dev seforim access goes through seforimApi (the KitveiHakodesh service), not here.
-  throw new Error('seforimDb.query() is hosted-only; dev uses seforimApi')
 }

@@ -32,6 +32,9 @@ const KEYS = {
   SETTINGS_COMMENTARY_MAX_WIDTH: 'commentary.maxWidth',
   SETTINGS_DEFAULT_AUTO_SYNC_COMMENTARY: 'commentary.defaultAutoSync',
 
+  // Word link tooltip
+  SETTINGS_WORD_LINK_TOOLTIP_FONT_SIZE: 'wordLinkTooltip.fontSize',
+
   // Divine-name censoring
   SETTINGS_CENSOR_DIVINE: 'censor.divineNames',
   SETTINGS_CENSOR_ELOKIM: 'censor.elokimMode',
@@ -70,12 +73,25 @@ const KEYS = {
   SETTINGS_RESUME_LAST_READ: 'app.resumeLastRead',
   SETTINGS_TITLE_BAR_HIDDEN_BUTTONS: 'titleBar.hiddenButtons',
 
+  // Book-view chrome. These are reader preferences like any other, so they live here
+  // and get wiped by reset() — bookViewStore owned them until the settings reset left
+  // its refs holding stale values. The key strings are the ones it used, so an existing
+  // preference carries over.
+  SETTINGS_TOOLBAR: 'bookView.toolbarVisible',
+  SETTINGS_TOOLBAR_POSITION: 'bookView.toolbarPosition',
+  SETTINGS_AUTO_SELECT_TOP_LINE: 'bookView.autoSelectTopLine',
+  SETTINGS_SPLIT_VIEW: 'splitView.enabled',
+  SETTINGS_SPLIT_VIEW_FRACTION: 'splitView.fraction',
+
   // Per-feature preferences
+  SETTINGS_BOOKS_VIEW: 'books.view',
   SETTINGS_PDF_FILTERS: 'pdf.pageFilters',
   SETTINGS_DICTIONARY_ZOOM: 'dictionary.zoom',
   SETTINGS_MIDOT_DISCLAIMER: 'midot.disclaimerAccepted',
+  SETTINGS_TERMS_ACCEPTED: 'app.termsAccepted',
   SETTINGS_HB_LOCAL_FOLDER: 'hebrewBooks.localFolder',
   SETTINGS_FILE_SEARCH_SORT_ORDER: 'fileSearch.sortOrder',
+  SETTINGS_ERROR_REPORT_EMAIL: 'errorReport.senderEmail',
 } as const
 import { getHbLocalFolderFromRegistry, setHbLocalFolderInRegistry, hasNativeChromeTabs } from '@/webview-host/bridge'
 import { getWordLinkTargetsForBook } from '@/webview-host/seforimApi'
@@ -94,9 +110,17 @@ import {
 } from '@/utils/censorDivineNames'
 
 export type NewTabPage = 'homepage' | 'openfile' | 'hebrewbooks' | 'search'
+/** Which edge of the book view the toolbar docks to. */
+export type ToolbarPosition = 'top' | 'bottom' | 'left' | 'right'
+/** Layout modes for the book catalog page. */
+export type BooksView = 'list' | 'tiles'
 // Legacy values from previous app name iterations — kept only for migrating old user data.
 // Do not remove these; they are matched in normalizeNewTabPage below.
 type LegacyNewTabPage = NewTabPage | 'kezayit-search' | 'kitveihakodesh-search'
+// The catalog also had a tree view once. It is gone, but the preference was never
+// cleared from disk, so anyone who chose it still has it stored under the same key
+// this setting uses again — see normalizeBooksView.
+type LegacyBooksView = BooksView | 'tree'
 
 const DEFAULTS = {
   // How the divine names are rendered. Was a boolean in builds before the
@@ -112,19 +136,18 @@ const DEFAULTS = {
   // now trail as fallbacks for a build with the font files stripped.
   headerFont: "'Heebo', 'Segoe UI Variable', 'Segoe UI', sans-serif",
   // Bundled, so this resolves on every machine; OS David only if the file is missing.
-  // Same family as teamimTextFont on purpose: it draws te'amim, so a book that turns
-  // out to carry them needs no second face to look right.
-  textFont: "'Taamey Frank CLM', David, serif",
+  // Frank Ruehl Libre is the default for all books and commentaries.
+  textFont: "'Frank Ruehl Libre', David, serif",
   // Body font for books whose text carries cantillation marks (the hasTeamim column).
-  // Kept as its own setting so a reader can give those books a different face, even
-  // though it now matches textFont by default; both are Taamey Frank CLM, BUNDLED in
-  // public/fonts/. David follows as the Windows fallback for a build with the font
-  // files stripped -- it draws only 1 of the 31 marks, so it is a last resort.
+  // Taamey Frank CLM is the dedicated teamim font; it is bundled in public/fonts/ and
+  // draws all 31 cantillation marks correctly. David follows as the Windows fallback
+  // for a build with the font files stripped -- it draws only 1 of the 31 marks, so
+  // it is a last resort.
   teamimTextFont: "'Taamey Frank CLM', David, serif",
   fontSize: 120,
-  // 400 = CSS `normal`. Heebo is variable so every slider value is a real weight; the
-  // CLM faces ship regular and bold only, so in between the browser picks the nearer
-  // of the two rather than drawing a true intermediate weight.
+  // 400 = CSS `normal`. Both Heebo and Frank Ruehl Libre are variable fonts, so the
+  // slider is 1:1 mapped to real weight values across the full range. Taamey Frank CLM
+  // (for teamim books only) is discrete with 400/700 only.
   fontWeight: 400,
   linePadding: 1.6,
   // Off by default: with an absolute line box, a word larger than the body text
@@ -132,18 +155,23 @@ const DEFAULTS = {
   // spacing at the cost of a possible overlap — is the user's to opt into.
   fixedLineHeight: false,
   commentaryHeaderFont: "'Heebo', 'Segoe UI Variable', 'Segoe UI', sans-serif",
-  commentaryTextFont: "'Taamey Frank CLM', David, serif",
+  commentaryTextFont: "'Frank Ruehl Libre', David, serif",
   // Deliberately smaller than the main text's 120%. The commentary is the supporting
   // column, and separate settings are ON by default, so this size is what a reader
   // actually sees rather than a value that only takes effect once they opt in.
   commentaryFontSize: 100,
   commentaryFontWeight: 400,
   commentaryLinePadding: 1.6,
+  wordLinkTooltipFontSize: 100,
   appZoom: 1.0,
   dictionaryZoom: 100,
   newTabPage: 'homepage' as NewTabPage,
+  booksView: 'tiles' as BooksView,
   fileSearchSortOrder:
     'relevance' as import('@/features/local-file-search/useLocalFileSearch').LocalFileSearchSortOrder,
+  // The address a "דיווח על טעות" report is sent from. Remembered so the user types
+  // it once, not once per report; empty means they have never filled it in.
+  errorReportSenderEmail: '',
   pdfPageFilters: false,
   resumeLastRead: true,
   showClock: false,
@@ -174,6 +202,13 @@ const DEFAULTS = {
   // class + per-element scroll activity tracking) is owned by
   // useUiChromeVisibility, not this store.
   scrollbarsHidden: false,
+  toolbarVisible: true,
+  toolbarPosition: 'top' as ToolbarPosition,
+  // Only a placeholder: both init() and reset() derive this from
+  // defaultAutoSyncCommentary rather than reading this value.
+  autoSelectTopLine: false,
+  splitViewEnabled: false,
+  splitViewFraction: 0.5,
   // The always-on icon rail beside the page (AppNavSidebar). On by default in the standalone
   // demo app, which has the width for it and no other chrome competing down that side; off in
   // the VSTO task pane (too narrow to give 44px away) and in the dev browser, which mirrors
@@ -248,6 +283,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const commentaryFontSize = ref(DEFAULTS.commentaryFontSize)
   const commentaryFontWeight = ref(DEFAULTS.commentaryFontWeight)
   const commentaryLinePadding = ref(DEFAULTS.commentaryLinePadding)
+  const wordLinkTooltipFontSize = ref(DEFAULTS.wordLinkTooltipFontSize)
   const appZoom = ref(DEFAULTS.appZoom)
   const dictionaryZoom = ref(DEFAULTS.dictionaryZoom)
   const newTabPage = ref<NewTabPage>(DEFAULTS.newTabPage)
@@ -257,6 +293,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const defaultAutoSyncCommentary = ref(DEFAULTS.defaultAutoSyncCommentary)
   const setupDone = ref(false)
   const midotDisclaimerAccepted = ref(false)
+  const termsAccepted = ref(false)
   const addressBarHintDone = ref(false)
   const searchContextMarginWords = ref(DEFAULTS.searchContextMarginWords)
   const searchMaxWordDistance = ref(DEFAULTS.searchMaxWordDistance)
@@ -275,6 +312,13 @@ export const useSettingsStore = defineStore('settings', () => {
   const commentaryMaxWidth = ref(DEFAULTS.commentaryMaxWidth)
   const titleBarHiddenButtons = ref<string[]>(DEFAULTS.titleBarHiddenButtons)
   const scrollbarsHidden = ref(DEFAULTS.scrollbarsHidden)
+  // Book-view chrome preferences. bookViewStore reads these; the per-pane fan-out
+  // (toolbar visible per pane, focused pane) stays there because it is session state.
+  const toolbarVisible = ref(DEFAULTS.toolbarVisible)
+  const toolbarPosition = ref<ToolbarPosition>(DEFAULTS.toolbarPosition)
+  const autoSelectTopLine = ref(DEFAULTS.autoSelectTopLine)
+  const splitViewEnabled = ref(DEFAULTS.splitViewEnabled)
+  const splitViewFraction = ref(DEFAULTS.splitViewFraction)
   // Per-pane rail visibility. Each pane owns its own: toggling one never moves the other,
   // and each persists separately, like every other per-pane value.
   const navSidebarVisibleByPane = ref<Record<1 | 2, boolean>>({
@@ -292,6 +336,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const showRecentlyOpened = ref(DEFAULTS.showRecentlyOpened)
   const showFrequentFolders = ref(DEFAULTS.showFrequentFolders)
   const fileSearchSortOrder = ref(DEFAULTS.fileSearchSortOrder)
+  const errorReportSenderEmail = ref(DEFAULTS.errorReportSenderEmail)
+  /** Which layout the book catalog page renders in. */
+  const booksView = ref<BooksView>(DEFAULTS.booksView)
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -374,6 +421,7 @@ export const useSettingsStore = defineStore('settings', () => {
     loadSetting(KEYS.SETTINGS_COMMENTARY_FONT_SIZE, commentaryFontSize)
     loadSetting(KEYS.SETTINGS_COMMENTARY_FONT_WEIGHT, commentaryFontWeight)
     loadSetting(KEYS.SETTINGS_COMMENTARY_LINE_PADDING, commentaryLinePadding)
+    loadSetting(KEYS.SETTINGS_WORD_LINK_TOOLTIP_FONT_SIZE, wordLinkTooltipFontSize)
     loadSetting(KEYS.SETTINGS_APP_ZOOM, appZoom)
     loadSetting(KEYS.SETTINGS_DICTIONARY_ZOOM, dictionaryZoom)
     const storedNewTabPage = normalizeNewTabPage(lsGet<LegacyNewTabPage>(KEYS.SETTINGS_NEW_TAB_PAGE))
@@ -384,6 +432,7 @@ export const useSettingsStore = defineStore('settings', () => {
     loadSetting(KEYS.SETTINGS_SETUP_DONE, setupDone)
     loadSetting(KEYS.SETTINGS_DEFAULT_AUTO_SYNC_COMMENTARY, defaultAutoSyncCommentary)
     loadSetting(KEYS.SETTINGS_MIDOT_DISCLAIMER, midotDisclaimerAccepted)
+    loadSetting(KEYS.SETTINGS_TERMS_ACCEPTED, termsAccepted)
     loadSetting(KEYS.SETTINGS_ADDRESS_BAR_HINT_DONE, addressBarHintDone)
     loadSetting(KEYS.SETTINGS_SEARCH_CONTEXT_MARGIN, searchContextMarginWords)
     loadSetting(KEYS.SETTINGS_SEARCH_MAX_WORD_DISTANCE, searchMaxWordDistance)
@@ -413,11 +462,6 @@ export const useSettingsStore = defineStore('settings', () => {
       copyAsSourceWithQuotation.value = repaired.copyAsSourceWithQuotation
     }
     loadSetting(KEYS.SETTINGS_HB_LOCAL_FOLDER, hebrewBooksLocalFolder)
-    // If the WPF installer configured a local folder but localStorage has nothing yet,
-    // seed it from the injected value so the settings page reflects it immediately.
-    if (!hebrewBooksLocalFolder.value && window.__webviewHbLocalFolder) {
-      hebrewBooksLocalFolder.value = window.__webviewHbLocalFolder
-    }
     // In dev, the HB folder lives in the SHARED registry (HKCU\...\KitveiHakodesh\HebrewBooks\
     // LocalFolder) so dev and the hosted app agree. Seed from there when localStorage is empty;
     // the persist watcher below writes user changes back to the same registry value.
@@ -432,6 +476,14 @@ export const useSettingsStore = defineStore('settings', () => {
     loadSetting(KEYS.SETTINGS_COMMENTARY_MAX_WIDTH, commentaryMaxWidth)
     loadSetting(KEYS.SETTINGS_TITLE_BAR_HIDDEN_BUTTONS, titleBarHiddenButtons)
     loadSetting(KEYS.SETTINGS_SCROLLBARS_HIDDEN, scrollbarsHidden)
+    loadSetting(KEYS.SETTINGS_TOOLBAR, toolbarVisible)
+    loadSetting(KEYS.SETTINGS_TOOLBAR_POSITION, toolbarPosition)
+    loadSetting(KEYS.SETTINGS_SPLIT_VIEW, splitViewEnabled)
+    loadSetting(KEYS.SETTINGS_SPLIT_VIEW_FRACTION, splitViewFraction)
+    // No stored value means "follow the commentary default" rather than the bare
+    // `false` — that fallback was bookViewStore.init()'s and has to survive the move.
+    const storedAutoSelect = lsGet<boolean>(KEYS.SETTINGS_AUTO_SELECT_TOP_LINE)
+    autoSelectTopLine.value = storedAutoSelect ?? defaultAutoSyncCommentary.value
     const navSidebar1 = lsGet<boolean>(KEYS.SETTINGS_NAV_SIDEBAR)
     if (navSidebar1 != null) navSidebarVisibleByPane.value[1] = navSidebar1
     const navSidebar2 = lsGet<boolean>(KEYS.SETTINGS_NAV_SIDEBAR_PANE2)
@@ -439,6 +491,9 @@ export const useSettingsStore = defineStore('settings', () => {
     loadSetting(KEYS.SETTINGS_SHOW_RECENTLY_OPENED, showRecentlyOpened)
     loadSetting(KEYS.SETTINGS_SHOW_FREQUENT_FOLDERS, showFrequentFolders)
     loadSetting(KEYS.SETTINGS_FILE_SEARCH_SORT_ORDER, fileSearchSortOrder)
+    loadSetting(KEYS.SETTINGS_ERROR_REPORT_EMAIL, errorReportSenderEmail)
+    const storedBooksView = normalizeBooksView(lsGet<LegacyBooksView>(KEYS.SETTINGS_BOOKS_VIEW))
+    if (storedBooksView != null) booksView.value = storedBooksView
     applyCSSVariables()
   }
 
@@ -461,6 +516,7 @@ export const useSettingsStore = defineStore('settings', () => {
   persistSetting(commentaryFontSize, KEYS.SETTINGS_COMMENTARY_FONT_SIZE, applyCSSVariables)
   persistSetting(commentaryFontWeight, KEYS.SETTINGS_COMMENTARY_FONT_WEIGHT, applyCSSVariables)
   persistSetting(commentaryLinePadding, KEYS.SETTINGS_COMMENTARY_LINE_PADDING, applyCSSVariables)
+  persistSetting(wordLinkTooltipFontSize, KEYS.SETTINGS_WORD_LINK_TOOLTIP_FONT_SIZE)
   persistSetting(appZoom, KEYS.SETTINGS_APP_ZOOM, applyCSSVariables)
   persistSetting(dictionaryZoom, KEYS.SETTINGS_DICTIONARY_ZOOM)
   persistSetting(newTabPage, KEYS.SETTINGS_NEW_TAB_PAGE)
@@ -489,6 +545,11 @@ export const useSettingsStore = defineStore('settings', () => {
   persistSetting(commentaryMaxWidth, KEYS.SETTINGS_COMMENTARY_MAX_WIDTH, applyCSSVariables)
   persistSetting(titleBarHiddenButtons, KEYS.SETTINGS_TITLE_BAR_HIDDEN_BUTTONS)
   persistSetting(scrollbarsHidden, KEYS.SETTINGS_SCROLLBARS_HIDDEN)
+  persistSetting(toolbarVisible, KEYS.SETTINGS_TOOLBAR)
+  persistSetting(toolbarPosition, KEYS.SETTINGS_TOOLBAR_POSITION)
+  persistSetting(autoSelectTopLine, KEYS.SETTINGS_AUTO_SELECT_TOP_LINE)
+  persistSetting(splitViewEnabled, KEYS.SETTINGS_SPLIT_VIEW)
+  persistSetting(splitViewFraction, KEYS.SETTINGS_SPLIT_VIEW_FRACTION)
   // Watched deeply because the two panes share one object; each writes its own key.
   watch(
     () => navSidebarVisibleByPane.value[1],
@@ -501,6 +562,8 @@ export const useSettingsStore = defineStore('settings', () => {
   persistSetting(showRecentlyOpened, KEYS.SETTINGS_SHOW_RECENTLY_OPENED)
   persistSetting(showFrequentFolders, KEYS.SETTINGS_SHOW_FREQUENT_FOLDERS)
   persistSetting(fileSearchSortOrder, KEYS.SETTINGS_FILE_SEARCH_SORT_ORDER)
+  persistSetting(errorReportSenderEmail, KEYS.SETTINGS_ERROR_REPORT_EMAIL)
+  persistSetting(booksView, KEYS.SETTINGS_BOOKS_VIEW)
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -585,6 +648,11 @@ export const useSettingsStore = defineStore('settings', () => {
     lsSet(KEYS.SETTINGS_MIDOT_DISCLAIMER, true)
   }
 
+  function acceptTerms() {
+    termsAccepted.value = true
+    lsSet(KEYS.SETTINGS_TERMS_ACCEPTED, true)
+  }
+
   /**
    * The title bar has taught the reader that its box opens. Called the first time
    * they click into it, and never unset - the hint has done its job for good.
@@ -619,6 +687,7 @@ export const useSettingsStore = defineStore('settings', () => {
     commentaryFontSize.value = DEFAULTS.commentaryFontSize
     commentaryFontWeight.value = DEFAULTS.commentaryFontWeight
     commentaryLinePadding.value = DEFAULTS.commentaryLinePadding
+    wordLinkTooltipFontSize.value = DEFAULTS.wordLinkTooltipFontSize
     appZoom.value = DEFAULTS.appZoom
     dictionaryZoom.value = DEFAULTS.dictionaryZoom
     newTabPage.value = DEFAULTS.newTabPage
@@ -647,6 +716,14 @@ export const useSettingsStore = defineStore('settings', () => {
     commentaryMaxWidth.value = DEFAULTS.commentaryMaxWidth
     titleBarHiddenButtons.value = DEFAULTS.titleBarHiddenButtons
     scrollbarsHidden.value = DEFAULTS.scrollbarsHidden
+    toolbarVisible.value = DEFAULTS.toolbarVisible
+    toolbarPosition.value = DEFAULTS.toolbarPosition
+    // Mirrors the load-time rule (no stored value => follow defaultAutoSyncCommentary)
+    // rather than the bare default, so the state right after a reset matches the state
+    // after the reload that follows it. Assigned after defaultAutoSyncCommentary above.
+    autoSelectTopLine.value = defaultAutoSyncCommentary.value
+    splitViewEnabled.value = DEFAULTS.splitViewEnabled
+    splitViewFraction.value = DEFAULTS.splitViewFraction
     navSidebarVisibleByPane.value = {
       1: DEFAULTS.navSidebarVisible,
       2: DEFAULTS.navSidebarVisible,
@@ -657,6 +734,8 @@ export const useSettingsStore = defineStore('settings', () => {
     // key deleted while the ref kept the old value — memory and disk disagreeing until the
     // next reload.
     fileSearchSortOrder.value = DEFAULTS.fileSearchSortOrder
+    errorReportSenderEmail.value = DEFAULTS.errorReportSenderEmail
+    booksView.value = DEFAULTS.booksView
     applyCSSVariables()
     // The persist watchers flush on nextTick, so clearing synchronously here would be
     // undone by them re-writing every key we just deleted. Clear once they have run.
@@ -667,10 +746,11 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     divineNameMode, elokimMode, otherNamesSelected, censorOptions, censorCacheKey,
     diacriticsState, hiddenWordLinkMarkerBookIds, headerFont, textFont, teamimTextFont, fontSize, fontWeight, linePadding, fixedLineHeight,
-    commentaryHeaderFont, commentaryTextFont, commentaryFontSize, commentaryFontWeight, commentaryLinePadding,
+    commentaryHeaderFont, commentaryTextFont, commentaryFontSize, commentaryFontWeight, commentaryLinePadding, wordLinkTooltipFontSize,
     appZoom, dictionaryZoom, newTabPage, pdfPageFilters, resumeLastRead,
     showClock,
-    defaultAutoSyncCommentary, setupDone, midotDisclaimerAccepted, addressBarHintDone, searchContextMarginWords,
+    toolbarVisible, toolbarPosition, autoSelectTopLine, splitViewEnabled, splitViewFraction,
+    defaultAutoSyncCommentary, setupDone, termsAccepted, midotDisclaimerAccepted, addressBarHintDone, searchContextMarginWords,
     searchMaxWordDistance, searchRequireOrdered, searchExpandKetiv, searchExpandRelated, searchWildcardWrap, searchGrammarWrap,
     copyCleanText,
     copyJoinLines,
@@ -688,11 +768,23 @@ export const useSettingsStore = defineStore('settings', () => {
     showRecentlyOpened,
     showFrequentFolders,
     fileSearchSortOrder,
+    errorReportSenderEmail,
+    booksView,
     init, cycleDiacritics, cycleDiacriticsNoTeamim, toggleWordLinkMarkers, toggleWordLinkMarkersForBook,
-    togglePdfPageFilters, reset, completeSetup, acceptMidotDisclaimer, completeAddressBarHint,
+    togglePdfPageFilters, reset, completeSetup, acceptTerms, acceptMidotDisclaimer, completeAddressBarHint,
   }
 })
   function normalizeNewTabPage(value: LegacyNewTabPage | null): NewTabPage | null {
     if (value === 'kezayit-search' || value === 'kitveihakodesh-search') return 'search'
     return value
+  }
+
+  // A stored value is whatever an older build wrote, not necessarily a BooksView:
+  // the catalog's retired tree view is still on disk for anyone who picked it. Map
+  // it to the list, and reject anything else unrecognized, because the title bar
+  // indexes a two-key record by this value and would throw on a third one.
+  function normalizeBooksView(value: LegacyBooksView | null): BooksView | null {
+    if (value === 'list' || value === 'tiles') return value
+    if (value === 'tree') return 'list'
+    return null
   }

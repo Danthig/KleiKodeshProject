@@ -3,6 +3,8 @@ import AppShell from '@/layout/AppShell.vue'
 import ClockWidget from '@/components/ClockWidget.vue'
 import GlobalContextMenu from '@/components/GlobalContextMenu.vue'
 import ToastBanner from '@/components/ToastBanner.vue'
+import ServiceUnavailableBanner from '@/components/ServiceUnavailableBanner.vue'
+import UpdateAvailablePrompt from '@/components/UpdateAvailablePrompt.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import SetupWizard from '@/features/settings/SetupWizard.vue'
 import { ref, computed, watch } from 'vue'
@@ -15,13 +17,17 @@ import { storeToRefs } from 'pinia'
 import { useTabSwipeNavigation } from '@/composables/useTabSwipeNavigation'
 import { activateTabAnyPane } from '@/composables/useCrossPaneTabActions'
 import { isVstoEnvironment as isVsto } from '@/webview-host/bridge'
+import { startErrorReportRetries } from '@/features/book-view/errorReport/errorReportService'
 
 useTabSwipeNavigation()
+// Error reports that could not go out (offline, no endpoint yet) are retried from
+// here — once for the whole app, not once per book pane.
+startErrorReportRetries()
 
 const settingsStore = useSettingsStore()
 const bookViewStore = useBookViewStore()
 const tabStore = useTabStore()
-const { setupDone, showClock } = storeToRefs(settingsStore)
+const { setupDone, termsAccepted, showClock } = storeToRefs(settingsStore)
 
 // ── Split view availability ───────────────────────────────────────────────────
 // Split view requires enough horizontal space for two usable panes. The threshold is
@@ -177,9 +183,11 @@ useEventListener(window, 'beforeunload', (e: BeforeUnloadEvent) => {
     <AppShell v-if="bookViewStore.splitViewEnabled" :pane-id="2" />
 
     <ClockWidget v-if="showClock" />
-    <SetupWizard v-if="!setupDone" />
+    <SetupWizard v-if="!setupDone || !termsAccepted" />
     <GlobalContextMenu />
     <ToastBanner />
+    <ServiceUnavailableBanner />
+    <UpdateAvailablePrompt />
     <ConfirmDialog
       v-if="pdfClosePending"
       title="שינויים שלא נשמרו"

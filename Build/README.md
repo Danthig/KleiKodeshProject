@@ -1,6 +1,6 @@
 # Build — Installer Build System
 
-Three-installer pipeline: builds WPF installer + NSIS wrapper for x64, x86, and AnyCPU variants in a single run.
+One-installer pipeline: builds the WPF installer + NSIS wrapper for AnyCPU (the only variant since 2026-10-11).
 
 ## Quick Start
 
@@ -18,7 +18,7 @@ Build/
 │   ├── Helpers/
 │   │   ├── AddinInstaller.cs           — Extract VSTO zip, register add-in, version management
 │   │   ├── AdminHelper.cs              — UAC elevation & re-launch
-│   │   ├── DocumentLocatorHelper.cs    — Service shutdown/restart for file-locking
+│   │   ├── KitveiHakodeshServiceHelper.cs    — Service shutdown/restart for file-locking
 │   │   ├── FullSystemCleaner.cs        — Full uninstall cleanup
 │   │   ├── KitveiHakodeshHelper.cs     — KitveiHakodesh DB path handling
 │   │   ├── SettingsManager.cs          — Registry-backed settings
@@ -44,9 +44,7 @@ Build/
 │   ├── build-menu.ps1          — Interactive menu (prompts user)
 │   └── build-helpers.ps1       — Shared functions & constants
 ├── releases/               — Output folder
-│   ├── KleiKodeshSetup-vX.Y.Z-x64.exe
-│   ├── KleiKodeshSetup-vX.Y.Z-x86.exe
-│   ├── KleiKodeshSetup-vX.Y.Z.exe          (AnyCPU)
+│   ├── KleiKodeshSetup-vX.Y.Z.exe          (AnyCPU, the only installer)
 │   └── KitveiHakodeshPortable-vX.Y.Z.zip   (standalone demo app)
 ├── build-menu.bat         — Entry point (launches PowerShell menu)
 └── RELEASE_NOTES.txt      — Template for release notes
@@ -80,7 +78,7 @@ Single build run produces one installer and one portable zip:
 
 Both files are placed in `Build/releases/` and uploaded to the GitHub release.
 
-> x64 and x86 variants are defined in the script but currently disabled (commented out). Only the AnyCPU variant is built.
+> Only the AnyCPU installer exists; the x64 and x86 variants were removed on 2026-10-11.
 
 ## Version Management
 

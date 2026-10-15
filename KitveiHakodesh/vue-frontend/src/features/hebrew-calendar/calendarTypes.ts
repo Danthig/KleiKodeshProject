@@ -50,7 +50,14 @@ export interface CalendarWeek {
   days: CalendarDay[]
 }
 
+export type CityKey =
+  | 'jerusalem' | 'telAviv' | 'haifa' | 'beerSheva' | 'ashdod' | 'netanya' | 'petachTikva' | 'rishonLezion'
+  | 'bneiBrak' | 'ramatGan' | 'herzliya' | 'rechovot' | 'modiin' | 'eilat' | 'tzfat' | 'tiberias'
+  | 'newYork' | 'london' | 'antwerp' | 'montreal'
+
 export interface City {
+  /** Stable ASCII id: keys the per-city zmanim data (climate, Itim Labina luach). */
+  key: CityKey
   name: string
   lat: number
   lng: number
@@ -64,24 +71,24 @@ export interface City {
  * zmanim loader — can import it without dragging in the hebcal engine.
  */
 export const CITIES: City[] = [
-  { name: 'ירושלים', lat: 31.7683, lng: 35.2137, elevation: 800, tzid: 'Asia/Jerusalem' },
-  { name: 'תל אביב', lat: 32.0853, lng: 34.7818, elevation: 5, tzid: 'Asia/Jerusalem' },
-  { name: 'חיפה', lat: 32.794, lng: 34.9896, elevation: 10, tzid: 'Asia/Jerusalem' },
-  { name: 'באר שבע', lat: 31.2518, lng: 34.7913, elevation: 280, tzid: 'Asia/Jerusalem' },
-  { name: 'אשדוד', lat: 31.8044, lng: 34.6553, elevation: 30, tzid: 'Asia/Jerusalem' },
-  { name: 'נתניה', lat: 32.3215, lng: 34.8532, elevation: 20, tzid: 'Asia/Jerusalem' },
-  { name: 'פתח תקווה', lat: 32.0878, lng: 34.8878, elevation: 50, tzid: 'Asia/Jerusalem' },
-  { name: 'ראשון לציון', lat: 31.9642, lng: 34.8044, elevation: 30, tzid: 'Asia/Jerusalem' },
-  { name: 'בני ברק', lat: 32.0833, lng: 34.8333, elevation: 20, tzid: 'Asia/Jerusalem' },
-  { name: 'רמת גן', lat: 32.0684, lng: 34.8248, elevation: 30, tzid: 'Asia/Jerusalem' },
-  { name: 'הרצליה', lat: 32.1663, lng: 34.8439, elevation: 20, tzid: 'Asia/Jerusalem' },
-  { name: 'רחובות', lat: 31.8928, lng: 34.8113, elevation: 50, tzid: 'Asia/Jerusalem' },
-  { name: 'מודיעין', lat: 31.8969, lng: 35.0095, elevation: 300, tzid: 'Asia/Jerusalem' },
-  { name: 'אילת', lat: 29.5577, lng: 34.9519, elevation: 10, tzid: 'Asia/Jerusalem' },
-  { name: 'צפת', lat: 32.9646, lng: 35.4956, elevation: 900, tzid: 'Asia/Jerusalem' },
-  { name: 'טבריה', lat: 32.7922, lng: 35.5312, elevation: -210, tzid: 'Asia/Jerusalem' },
-  { name: 'ניו יורק', lat: 40.7128, lng: -74.006, elevation: 10, tzid: 'America/New_York' },
-  { name: 'לונדון', lat: 51.5074, lng: -0.1278, elevation: 10, tzid: 'Europe/London' },
-  { name: 'אנטוורפן', lat: 51.2194, lng: 4.4025, elevation: 10, tzid: 'Europe/Brussels' },
-  { name: 'מונטריאול', lat: 45.5017, lng: -73.5673, elevation: 30, tzid: 'America/Toronto' },
+  { name: 'ירושלים', key: 'jerusalem', lat: 31.7884, lng: 35.2184, elevation: 798, tzid: 'Asia/Jerusalem' },
+  { name: 'תל אביב', key: 'telAviv', lat: 32.0855, lng: 34.782, elevation: 19, tzid: 'Asia/Jerusalem' },
+  { name: 'חיפה', key: 'haifa', lat: 32.806, lng: 35.0023, elevation: 81, tzid: 'Asia/Jerusalem' },
+  { name: 'באר שבע', key: 'beerSheva', lat: 31.252, lng: 34.778, elevation: 268, tzid: 'Asia/Jerusalem' },
+  { name: 'אשדוד', key: 'ashdod', lat: 31.797, lng: 34.658, elevation: 19, tzid: 'Asia/Jerusalem' },
+  { name: 'נתניה', key: 'netanya', lat: 32.3433, lng: 34.856, elevation: 23, tzid: 'Asia/Jerusalem' },
+  { name: 'פתח תקווה', key: 'petachTikva', lat: 32.08, lng: 34.87, elevation: 59, tzid: 'Asia/Jerusalem' },
+  { name: 'ראשון לציון', key: 'rishonLezion', lat: 31.975, lng: 34.793, elevation: 44, tzid: 'Asia/Jerusalem' },
+  { name: 'בני ברק', key: 'bneiBrak', lat: 32.0858, lng: 34.8349, elevation: 45, tzid: 'Asia/Jerusalem' },
+  { name: 'רמת גן', key: 'ramatGan', lat: 32.061, lng: 34.833, elevation: 38, tzid: 'Asia/Jerusalem' },
+  { name: 'הרצליה', key: 'herzliya', lat: 32.16, lng: 34.84, elevation: 52, tzid: 'Asia/Jerusalem' },
+  { name: 'רחובות', key: 'rechovot', lat: 31.894, lng: 34.816, elevation: 53, tzid: 'Asia/Jerusalem' },
+  { name: 'מודיעין', key: 'modiin', lat: 31.8969, lng: 35.0095, elevation: 300, tzid: 'Asia/Jerusalem' },
+  { name: 'אילת', key: 'eilat', lat: 29.557, lng: 34.95, elevation: 47, tzid: 'Asia/Jerusalem' },
+  { name: 'צפת', key: 'tzfat', lat: 32.966, lng: 35.487, elevation: 638, tzid: 'Asia/Jerusalem' },
+  { name: 'טבריה', key: 'tiberias', lat: 32.782, lng: 35.516, elevation: 223, tzid: 'Asia/Jerusalem' },
+  { name: 'ניו יורק', key: 'newYork', lat: 40.7128, lng: -74.006, elevation: 10, tzid: 'America/New_York' },
+  { name: 'לונדון', key: 'london', lat: 51.5074, lng: -0.1278, elevation: 10, tzid: 'Europe/London' },
+  { name: 'אנטוורפן', key: 'antwerp', lat: 51.2194, lng: 4.4025, elevation: 10, tzid: 'Europe/Brussels' },
+  { name: 'מונטריאול', key: 'montreal', lat: 45.5017, lng: -73.5673, elevation: 30, tzid: 'America/Toronto' },
 ]

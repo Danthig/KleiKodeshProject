@@ -14,6 +14,67 @@ namespace KitveiHakodesh.Core.SeforimDb
     // The *Args and {Rows} envelopes that used to sit alongside these stay with the
     // transport that shapes them — they describe RPC calls, not data.
 
+    /// <summary>An alternate text version of a book — the version overlay picker's rows.
+    /// Only versions that actually carry content are returned.</summary>
+    [MessagePackObject(keyAsPropertyName: true)]
+    public sealed class BookVersionRow
+    {
+        public int Id { get; set; }
+        /// <summary>The upstream key, usually English. Stable; used for persistence.</summary>
+        public string VersionTitle { get; set; } = "";
+        /// <summary>Display name. Often absent, in which case the caller shows VersionTitle.</summary>
+        public string? HeVersionTitle { get; set; }
+        public string? VersionSource { get; set; }
+        public string? VersionNotes { get; set; }
+        public string? HeVersionNotes { get; set; }
+    }
+
+    /// <summary>The name of the upstream source a book came from.</summary>
+    [MessagePackObject(keyAsPropertyName: true)]
+    public sealed class BookSourceNameRow { public string SourceName { get; set; } = ""; }
+
+    /// <summary>
+    /// Everything the library records ABOUT a book - its credits, provenance and licence - for
+    /// the book view's info popover. Every field is optional: the two library schemas differ
+    /// (heDesc, collectiveTitleHe and the licence tables exist in only one of them), and most
+    /// books fill only a few. The lists are empty, never null, when the book has none.
+    /// </summary>
+    [MessagePackObject(keyAsPropertyName: true)]
+    public sealed class BookMetadataRow
+    {
+        public string Title { get; set; } = "";
+        public string? HeRef { get; set; }
+        public string? CollectiveTitle { get; set; }
+        public string? ShortDescription { get; set; }
+        public string? Description { get; set; }
+        public string? CategoryTitle { get; set; }
+        public string? SourceName { get; set; }
+        public List<string> Authors { get; set; } = new();
+        public List<string> PublicationPlaces { get; set; } = new();
+        public List<string> PublicationDates { get; set; } = new();
+        public List<string> Topics { get; set; } = new();
+        /// <summary>Licence codes as the library spells them (CC-BY, Public Domain, ...).</summary>
+        public List<string> Licenses { get; set; } = new();
+        /// <summary>Where the edition text came from - a name or a URL, as recorded.</summary>
+        public List<string> EditionSources { get; set; } = new();
+    }
+
+    /// <summary>One value out of the library's schema_meta table.</summary>
+    [MessagePackObject(keyAsPropertyName: true)]
+    public sealed class SchemaMetaValueRow { public string Value { get; set; } = ""; }
+
+    /// <summary>A line's canonical reference and stored text, for verifying a reported mistake
+    /// against what the library actually holds.</summary>
+    [MessagePackObject(keyAsPropertyName: true)]
+    public sealed class LineRefRow
+    {
+        public int Id { get; set; }
+        public int LineIndex { get; set; }
+        /// <summary>Nullable in the database — structural lines carry no reference.</summary>
+        public string? HeRef { get; set; }
+        public string Content { get; set; } = "";
+    }
+
     /// <summary>A category tree row — matches CategoryRow in webview-host/queries.types.ts.</summary>
     [MessagePackObject(keyAsPropertyName: true)]
     public sealed class CategoryRow
@@ -122,7 +183,7 @@ namespace KitveiHakodesh.Core.SeforimDb
         public int SourceBookId { get; set; }
     }
 
-    /// <summary>Supported=false → the open DB's schema predates link_anchor; callers should stop asking.</summary>
+    /// <summary>Supported=false → the DB has no word links at all; callers should stop asking. Core always answers true today (link_anchor or inline markers).</summary>
     [MessagePackObject(keyAsPropertyName: true)]
     public sealed class WordLinkAnchorsResult
     {
@@ -140,7 +201,7 @@ namespace KitveiHakodesh.Core.SeforimDb
         public string? Label { get; set; }
     }
 
-    /// <summary>Supported=false → the open DB's schema predates link_anchor; callers should stop asking.</summary>
+    /// <summary>Supported=false → the DB has no word links at all; callers should stop asking. Core always answers true today (link_anchor or inline markers).</summary>
     [MessagePackObject(keyAsPropertyName: true)]
     public sealed class WordLinkTargetsResult
     {
@@ -196,16 +257,6 @@ namespace KitveiHakodesh.Core.SeforimDb
 
     [MessagePackObject(keyAsPropertyName: true)]
     public sealed class BookIdRow { public int Id { get; set; } }
-
-    [MessagePackObject(keyAsPropertyName: true)]
-    public sealed class BoldLineRow
-    {
-        public string Content { get; set; } = "";
-        public string Title { get; set; } = "";
-        public int BookId { get; set; }
-        public int LineId { get; set; }
-        public int LineIndex { get; set; }
-    }
 
     [MessagePackObject(keyAsPropertyName: true)]
     public sealed class RawLineRow { public int Id { get; set; } public int LineIndex { get; set; } public string Content { get; set; } = ""; }

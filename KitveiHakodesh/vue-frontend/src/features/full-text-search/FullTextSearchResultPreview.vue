@@ -14,6 +14,7 @@ import { useWordLinkTooltip } from '@/features/book-view/lines/useWordLinkToolti
 import BookViewAbbrevTooltip from '@/features/book-view/lines/BookViewAbbrevTooltip.vue'
 import { useBookViewAbbrevTooltip } from '@/features/book-view/lines/useBookViewAbbrevTooltip'
 import type { PreviewState } from './useFullTextSearchPreview'
+import { teamimFontStyle } from '@/utils/teamimFont'
 
 const props = defineProps<{
   state: PreviewState
@@ -165,6 +166,7 @@ const { abbrevTooltip } = useBookViewAbbrevTooltip(boxEl)
       class="preview-line"
       :class="{ matched: line.lineIndex === state.lineIndex }"
       :data-matched="line.lineIndex === state.lineIndex ? '' : undefined"
+      :style="teamimFontStyle(line.html)"
       v-html="renderHtml(line.html)"
     />
   </div>
@@ -208,11 +210,10 @@ const { abbrevTooltip } = useBookViewAbbrevTooltip(boxEl)
 .preview-line :deep(.word-link:hover) {
   text-decoration-color: currentColor;
 }
-/* Colored per commentary via --wl-marker-color (palette in main.css), muted by
-   opacity — matches the reading views. */
+/* Muted by opacity — matches the reading views. All markers share the same color
+   (--text-secondary fallback). */
 .preview-line :deep(.word-link-marker) {
-  font-size: 0.72em;
-  vertical-align: super;
+  font-size: 0.6em;
   line-height: 1;
   color: var(--wl-marker-color, var(--text-secondary));
   opacity: 0.65;

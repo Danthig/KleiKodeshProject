@@ -45,11 +45,11 @@ namespace KitveiHakodesh.Core.SeforimDb
         // ── Lines ─────────────────────────────────────────────────────────────────
 
         /// <summary>A page of lines for streaming load.</summary>
-        public const string GetLinesPaged = @"
-            SELECT id, lineIndex, content
-            FROM line
-            WHERE bookId = @bookId
-            ORDER BY lineIndex
+        public static string GetLinesPaged(SeforimDbSchema schema) => $@"
+            SELECT l.id, l.lineIndex, {SeforimDbLineContentSql.ContentColumn(schema, "l")}
+            FROM line l{SeforimDbLineContentSql.ContentJoin(schema, "l")}
+            WHERE l.bookId = @bookId
+            ORDER BY l.lineIndex
             LIMIT @limit OFFSET @offset";
 
         // ── TOC ───────────────────────────────────────────────────────────────────
@@ -147,8 +147,10 @@ namespace KitveiHakodesh.Core.SeforimDb
             WHERE l.sourceLineId IN ({InPlaceholders("p", count)})";
 
         /// <summary>Content backfill for a batch of line ids.</summary>
-        public static string GetLineContents(int count) =>
-            $"SELECT id, content FROM line WHERE id IN ({InPlaceholders("p", count)})";
+        public static string GetLineContents(SeforimDbSchema schema, int count) =>
+            $"SELECT l.id, {SeforimDbLineContentSql.ContentColumn(schema, "l")}" +
+            $" FROM line l{SeforimDbLineContentSql.ContentJoin(schema, "l")}" +
+            $" WHERE l.id IN ({InPlaceholders("p", count)})";
 
         /// <summary>Word-level link anchors (link_anchor, SeforimLibrary schema v2+) for a batch of
         /// source lines. side 0 = the anchor sits in the source line's text. Offsets are visible-char
@@ -188,6 +190,41 @@ namespace KitveiHakodesh.Core.SeforimDb
               AND (la.charEnd IS NULL OR la.charEnd <= la.charStart)
             ORDER BY l.targetBookId";
 
+        // ── Inline commentator markers (DBs without link_anchor) ─────────────────────
+        // See SeforimDbInlineCommentatorMarkers for why these exist.
+
+        /// <summary>Book id and content of a batch of lines.</summary>
+        public static string GetLineBookIdsAndContents(SeforimDbSchema schema, int count) =>
+            $"SELECT l.id, l.bookId, {SeforimDbLineContentSql.ContentColumn(schema, "l")}" +
+            $" FROM line l{SeforimDbLineContentSql.ContentJoin(schema, "l")}" +
+            $" WHERE l.id IN ({InPlaceholders("p", count)})";
+
+        /// <summary>Every line of one book, with its content.</summary>
+        public static string GetBookLineContents(SeforimDbSchema schema) =>
+            $"SELECT l.id, {SeforimDbLineContentSql.ContentColumn(schema, "l")}" +
+            $" FROM line l{SeforimDbLineContentSql.ContentJoin(schema, "l")}" +
+            " WHERE l.bookId = @bookId";
+
+        /// <summary>For every line of one book, the OTHER books it is linked with — in either
+        /// direction, since a commentary link may be stored from either end.</summary>
+        public const string GetLinkedBooksForBookLines = @"
+            SELECT sourceLineId, targetBookId FROM link
+            WHERE sourceBookId = @bookId AND targetBookId <> @bookId
+            UNION ALL
+            SELECT targetLineId, sourceBookId FROM link
+            WHERE targetBookId = @bookId AND sourceBookId <> @bookId";
+
+        /// <summary>The lines linked with each of a batch of lines, in either direction, with
+        /// the linked line's book and index.</summary>
+        public static string GetLinkedLinesForLines(int count) => $@"
+            SELECT l.sourceLineId, l.targetBookId, l.targetLineId, t.lineIndex
+            FROM link l JOIN line t ON t.id = l.targetLineId
+            WHERE l.sourceLineId IN ({InPlaceholders("p", count)})
+            UNION ALL
+            SELECT l.targetLineId, l.sourceBookId, l.sourceLineId, s.lineIndex
+            FROM link l JOIN line s ON s.id = l.sourceLineId
+            WHERE l.targetLineId IN ({InPlaceholders("p", count)})";
+
         /// <summary>All connection type ids and names.</summary>
         public const string GetAllConnectionTypes = "SELECT id, name FROM connection_type";
 
@@ -202,33 +239,43 @@ namespace KitveiHakodesh.Core.SeforimDb
 
         /// <summary>Reverse lookup: source/targum lines that link TO the given target lines via the
         /// given connection types. A single-element IN handles both the single-line and range cases.</summary>
-        public static string GetReverseLineData(int lineCount, int typeCount) => $@"
-            SELECT l.sourceBookId, l.sourceLineId, ln.lineIndex, ln.content
+        public static string GetReverseLineData(SeforimDbSchema schema, int lineCount, int typeCount) => $@"
+            SELECT l.sourceBookId, l.sourceLineId, ln.lineIndex, {C_ContentColumn(schema, "ln")}
             FROM link l
-            JOIN line ln ON ln.id = l.sourceLineId
+            JOIN line ln ON ln.id = l.sourceLineId{C_ContentJoin(schema, "ln")}
             WHERE l.targetLineId IN ({InPlaceholders("t", lineCount)})
               AND l.connectionTypeId IN ({InPlaceholders("c", typeCount)})
               AND l.sourceBookId != l.targetBookId
               -- Drop lateral citations: a book that merely QUOTES one line of this one is
               -- not its base text. Keep a link only when the data DECLARES the base
-              -- relationship (baseProvenance > 0), or both books sit in the same top-level
-              -- corpus. A responsum citing a targum crosses corpora and is not declared.
+              -- relationship (the declared-base column > 0), or both books sit in the same
+              -- top-level corpus AND the book being asked about is not itself a base text.
+              --
+              -- The corpus test alone only catches citations that cross corpora - a responsum
+              -- quoting a targum. It says nothing about the commonest case, because a
+              -- commentary on a tractate lives in the same corpus as the tractate: without the
+              -- isBaseBook guard, every unprovenanced commentary linking into Berachot would
+              -- be reported as Berachot's source. A book flagged as a base text has no base
+              -- text, so the corpus fallback does not apply to one. The declared branch is
+              -- deliberately left alone - if the data asserts the relationship, that outranks
+              -- any inference made here.
               AND (
-                l.baseProvenance > 0
-                OR (SELECT cc.ancestorId FROM book src
-                      JOIN category_closure cc ON cc.descendantId = src.categoryId
-                      JOIN category c ON c.id = cc.ancestorId AND c.level = 0
-                     WHERE src.id = l.sourceBookId)
-                 = (SELECT cc.ancestorId FROM book tb
-                      JOIN category_closure cc ON cc.descendantId = tb.categoryId
-                      JOIN category c ON c.id = cc.ancestorId AND c.level = 0
-                     WHERE tb.id = l.targetBookId)
+                l.{schema.DeclaredBaseColumn} > 0
+                OR ((SELECT cc.ancestorId FROM book src
+                       JOIN category_closure cc ON cc.descendantId = src.categoryId
+                       JOIN category c ON c.id = cc.ancestorId AND c.level = 0
+                      WHERE src.id = l.sourceBookId)
+                  = (SELECT cc.ancestorId FROM book tb
+                       JOIN category_closure cc ON cc.descendantId = tb.categoryId
+                       JOIN category c ON c.id = cc.ancestorId AND c.level = 0
+                      WHERE tb.id = l.targetBookId)
+                    AND (SELECT tb2.isBaseBook FROM book tb2 WHERE tb2.id = l.targetBookId) = 0)
               )";
 
         /// <summary>Reverse lookup: the base text(s) of the given book, best first. A declared base
         /// beats an inferred one, a book flagged as a base text beats one that is not, then catalogue
         /// order, then how much of this book the candidate covers.</summary>
-        public static string GetReverseBooks(int typeCount) => $@"
+        public static string GetReverseBooks(SeforimDbSchema schema, int typeCount) => $@"
             SELECT l.sourceBookId
             FROM link l
             JOIN book sb ON sb.id = l.sourceBookId
@@ -237,21 +284,31 @@ namespace KitveiHakodesh.Core.SeforimDb
               AND l.sourceBookId != l.targetBookId
               -- Drop lateral citations: a book that merely QUOTES one line of this one is
               -- not its base text. Keep a link only when the data DECLARES the base
-              -- relationship (baseProvenance > 0), or both books sit in the same top-level
-              -- corpus. A responsum citing a targum crosses corpora and is not declared.
+              -- relationship (the declared-base column > 0), or both books sit in the same
+              -- top-level corpus AND the book being asked about is not itself a base text.
+              --
+              -- The corpus test alone only catches citations that cross corpora - a responsum
+              -- quoting a targum. It says nothing about the commonest case, because a
+              -- commentary on a tractate lives in the same corpus as the tractate: without the
+              -- isBaseBook guard, every unprovenanced commentary linking into Berachot would
+              -- be reported as Berachot's source. A book flagged as a base text has no base
+              -- text, so the corpus fallback does not apply to one. The declared branch is
+              -- deliberately left alone - if the data asserts the relationship, that outranks
+              -- any inference made here.
               AND (
-                l.baseProvenance > 0
-                OR (SELECT cc.ancestorId FROM book src
-                      JOIN category_closure cc ON cc.descendantId = src.categoryId
-                      JOIN category c ON c.id = cc.ancestorId AND c.level = 0
-                     WHERE src.id = l.sourceBookId)
-                 = (SELECT cc.ancestorId FROM book tb
-                      JOIN category_closure cc ON cc.descendantId = tb.categoryId
-                      JOIN category c ON c.id = cc.ancestorId AND c.level = 0
-                     WHERE tb.id = l.targetBookId)
+                l.{schema.DeclaredBaseColumn} > 0
+                OR ((SELECT cc.ancestorId FROM book src
+                       JOIN category_closure cc ON cc.descendantId = src.categoryId
+                       JOIN category c ON c.id = cc.ancestorId AND c.level = 0
+                      WHERE src.id = l.sourceBookId)
+                  = (SELECT cc.ancestorId FROM book tb
+                       JOIN category_closure cc ON cc.descendantId = tb.categoryId
+                       JOIN category c ON c.id = cc.ancestorId AND c.level = 0
+                      WHERE tb.id = l.targetBookId)
+                    AND (SELECT tb2.isBaseBook FROM book tb2 WHERE tb2.id = l.targetBookId) = 0)
               )
             GROUP BY l.sourceBookId
-            ORDER BY MAX(l.baseProvenance) DESC,
+            ORDER BY MAX(l.{schema.DeclaredBaseColumn}) DESC,
                      sb.isBaseBook DESC,
                      sb.orderIndex,
                      COUNT(DISTINCT l.targetLineId) DESC";
@@ -408,23 +465,153 @@ namespace KitveiHakodesh.Core.SeforimDb
 
         public const string GetBookIdByExactTitle = "SELECT id FROM book WHERE title = @title";
 
-        /// <summary>Bold-tagged headword lines for a set of books matching a content LIKE pattern.</summary>
-        public static string GetLinesWithContentPatternForBooks(int bookCount) => $@"
-            SELECT l.content, b.title, b.id AS bookId, l.id AS lineId, l.lineIndex
-            FROM line l JOIN book b ON b.id = l.bookId
-            WHERE l.bookId IN ({InPlaceholders("b", bookCount)})
-              AND l.content LIKE @pattern
-            LIMIT 50";
-
-        /// <summary>Lines from one book matching either of two content LIKE patterns.</summary>
-        public const string GetLinesWithEitherContentPattern = @"
-            SELECT id, lineIndex, content FROM line
-            WHERE bookId = @bookId AND (content LIKE @p1 OR content LIKE @p2)
-            ORDER BY lineIndex LIMIT 20";
-
         /// <summary>A single line from a book by its lineIndex.</summary>
-        public const string GetLineByBookAndLineIndex =
-            "SELECT id, lineIndex, content FROM line WHERE bookId = @bookId AND lineIndex = @lineIndex";
+        public static string GetLineByBookAndLineIndex(SeforimDbSchema schema) =>
+            "SELECT l.id, l.lineIndex, " + C_ContentColumn(schema, "l")
+            + " FROM line l" + C_ContentJoin(schema, "l")
+            + " WHERE l.bookId = @bookId AND l.lineIndex = @lineIndex";
+
+        /// <summary>
+        /// A page of lines as a specific version reads them.
+        ///
+        /// A version is an OVERLAY, not a separate book: version_line carries replacement
+        /// content keyed by the SAME line ids, so ids, lineIndex, the TOC, links and
+        /// highlights all stay valid when the text swaps underneath them.
+        ///
+        /// THREE cases, not two, and COALESCE cannot tell the last two apart:
+        ///
+        ///   no version_line row      the version does not cover this line  -> empty
+        ///   row with NULL content    schema 6 only: the version's text is IDENTICAL to the
+        ///                            base line, stored once rather than twice -> base text
+        ///   row with content         the version's own text
+        ///
+        /// Before schema 6 the column was NOT NULL, so NULL only ever meant "no row" and
+        /// COALESCE(vl.content, '') was right. In schema 6 it is nullable and 744 of 1542
+        /// versions are entirely NULL, so that same expression would render each of them as a
+        /// completely blank book. `vl.lineId IS NULL` is what distinguishes a missing row from
+        /// a present one, which is why the fallback is spelled out rather than coalesced.
+        ///
+        /// Structural lines (heRef IS NULL — headings and titles) keep the base text: a version
+        /// supplies body text, not the book's scaffolding. Body lines a partial version does not
+        /// cover come back EMPTY rather than falling back to the base, which would silently
+        /// interleave two different versions in one page and read as a single text. Partial
+        /// versions are real here — some cover 31 of 1584 lines.
+        ///
+        /// WHY TWO COLUMNS RATHER THAN ONE CASE: on schema 6 both `line_content.content` and
+        /// `version_line.content` hold zstd BLOBs, and SQLite applies ONE affinity to a CASE
+        /// expression as a whole. Mixing a BLOB arm with the `''` arm coerced the chosen BLOB
+        /// to TEXT, so the reader received the frame's raw bytes as a string, the codec's type
+        /// dispatch passed it through as already-decoded text, and the page rendered base64.
+        /// Selecting each candidate in its own column keeps both BLOBs intact; the reader picks
+        /// between them, where the choice costs nothing and no affinity is imposed.
+        /// </summary>
+        public static string GetVersionLinesPaged(SeforimDbSchema schema) => $@"
+            SELECT l.id, l.lineIndex,
+                   {C_RawContentExpression(schema, "l")} AS baseContent,
+                   vl.content AS versionContent,
+                   CASE WHEN l.heRef IS NULL  THEN 0
+                        WHEN vl.lineId IS NULL THEN 1
+                        WHEN vl.content IS NULL THEN 0
+                        ELSE 2 END AS contentSource
+            FROM line l{C_ContentJoin(schema, "l")}
+            LEFT JOIN version_line vl ON vl.versionId = @versionId AND vl.lineId = l.id
+            WHERE l.bookId = @bookId
+            ORDER BY l.lineIndex
+            LIMIT @limit OFFSET @offset";
+
+        /// <summary>
+        /// What <c>contentSource</c> in <see cref="GetVersionLinesPaged"/> says to read.
+        /// Kept beside the SQL that produces it so the two cannot drift.
+        /// </summary>
+        public static class VersionLineContentSource
+        {
+            /// <summary>Read `baseContent` — a structural line, or a version row that stores
+            /// NULL to mean "identical to the base".</summary>
+            public const int Base = 0;
+
+            /// <summary>Read neither — this version does not cover the line.</summary>
+            public const int Uncovered = 1;
+
+            /// <summary>Read `versionContent` — the version's own replacement text.</summary>
+            public const int Version = 2;
+        }
+
+        // ── Book versions, provenance and schema stamp ───────────────────────────────
+
+        /// <summary>
+        /// The alternate versions of a book that actually carry text.
+        ///
+        /// hasContent = 0 rows are metadata-only records (edition provenance and licence) with
+        /// no version_line rows behind them — most version rows in the shipped database are
+        /// these, and offering one would open a blank book. Ordered by the publisher's
+        /// priority, then title, so the best-regarded edition heads the list.
+        ///
+        /// The caller probes for the table first: book_version arrives in a later library schema.
+        /// </summary>
+        public const string GetBookVersions = @"
+            SELECT id, versionTitle, heVersionTitle, versionSource, versionNotes, heVersionNotes
+            FROM book_version
+            WHERE bookId = @bookId AND hasContent = 1
+            ORDER BY priority DESC, versionTitle";
+
+        /// <summary>The upstream source a book came from.</summary>
+        public const string GetBookSourceName =
+            "SELECT s.name AS sourceName FROM book b JOIN source s ON s.id = b.sourceId WHERE b.id = @bookId";
+
+        // ── Book metadata (the book view's info popover) ──────────────────────────────
+
+        /// <summary>
+        /// A book's own descriptive columns plus its category and source names. heDesc and
+        /// collectiveTitleHe exist in only one library schema, so the caller passes NULL in
+        /// their place where the column is missing.
+        /// </summary>
+        public static string GetBookMetadata(string descriptionColumn, string collectiveTitleColumn) => $@"
+            SELECT b.title, b.heRef, b.heShortDesc, {descriptionColumn}, {collectiveTitleColumn},
+                   c.title, s.name
+            FROM book b
+            LEFT JOIN category c ON c.id = b.categoryId
+            LEFT JOIN source s ON s.id = b.sourceId
+            WHERE b.id = @bookId";
+
+        public const string GetBookMetadataAuthors =
+            "SELECT a.name FROM book_author ba JOIN author a ON a.id = ba.authorId WHERE ba.bookId = @bookId";
+
+        public const string GetBookMetadataPublicationPlaces =
+            "SELECT p.name FROM book_pub_place bp JOIN pub_place p ON p.id = bp.pubPlaceId WHERE bp.bookId = @bookId";
+
+        /// <summary>pub_date's value column is `date`, not `name`, in both library schemas.</summary>
+        public const string GetBookMetadataPublicationDates =
+            "SELECT d.date FROM book_pub_date bd JOIN pub_date d ON d.id = bd.pubDateId WHERE bd.bookId = @bookId";
+
+        public const string GetBookMetadataTopics =
+            "SELECT t.name FROM book_topic bt JOIN topic t ON t.id = bt.topicId WHERE bt.bookId = @bookId";
+
+        /// <summary>Licences recorded on the book's versions (Otzaria schema: book_version.license).</summary>
+        public const string GetBookMetadataLicensesFromVersions =
+            "SELECT DISTINCT license FROM book_version WHERE bookId = @bookId";
+
+        /// <summary>Licences recorded on the book's editions (SeforimApp schema: book_edition → license).</summary>
+        public const string GetBookMetadataLicensesFromEditions =
+            "SELECT DISTINCT l.code FROM book_edition be JOIN license l ON l.id = be.licenseId WHERE be.bookId = @bookId";
+
+        public const string GetBookMetadataEditionSourcesFromVersions =
+            "SELECT DISTINCT versionSource FROM book_version WHERE bookId = @bookId";
+
+        public const string GetBookMetadataEditionSourcesFromEditions =
+            "SELECT DISTINCT e.sourceUrl FROM book_edition be JOIN edition e ON e.id = be.editionId WHERE be.bookId = @bookId";
+
+        /// <summary>
+        /// The library build, for STAMPING a report only. Schema detection goes by table
+        /// structure and never by this number — see SeforimDbSchema.
+        /// </summary>
+        public const string GetLibraryDbVersion =
+            "SELECT value FROM schema_meta WHERE key = 'db_version' LIMIT 1";
+
+        /// <summary>One line's canonical reference and stored text, for verifying a report.</summary>
+        public static string GetLineRefAndContent(SeforimDbSchema schema) =>
+            "SELECT l.id, l.lineIndex, l.heRef, " + C_ContentColumn(schema, "l")
+            + " FROM line l" + C_ContentJoin(schema, "l")
+            + " WHERE l.bookId = @bookId AND l.lineIndex = @lineIndex";
 
         /// <summary>Builds "@p0, @p1, …, @pN-1" for a dynamic IN clause.</summary>
         // ── Full-text search corpus feed (SeforimDbFtsCorpus) ─────────────────────────
@@ -435,26 +622,42 @@ namespace KitveiHakodesh.Core.SeforimDb
         internal const string FtsCountLines = "SELECT COUNT(*) FROM line";
 
         internal const string FtsCountLinesUpTo = "SELECT COUNT(*) FROM line WHERE id <= @id";
+        internal static string FtsGetLineContent(SeforimDbSchema schema) =>
+            "SELECT " + C_ContentExpression(schema, "l") +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            " WHERE l.id = @id";
 
-        internal const string FtsGetLineContent = "SELECT content FROM line WHERE id = @id";
-
-        /// <summary>Every line ascending, optionally capped — the from-scratch index feed.
+        /// <summary>Every line ascending, optionally capped - the from-scratch index feed.
         /// Streamed by the caller; no ORDER BY alternative exists, ascending id IS the contract.</summary>
-        internal static string FtsReadLines(bool hasLimit) => hasLimit
-            ? "SELECT id, content FROM line ORDER BY id LIMIT @lim"
-            : "SELECT id, content FROM line ORDER BY id";
+        internal static string FtsReadLines(SeforimDbSchema schema, bool hasLimit) =>
+            "SELECT l.id, " + C_ContentColumn(schema, "l") +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            " ORDER BY l.id" + (hasLimit ? " LIMIT @lim" : "");
 
-        /// <summary>Lines strictly after @after, ascending — the resume feed. Exclusive bound,
+        /// <summary>Lines strictly after @after, ascending - the resume feed. Exclusive bound,
         /// so the resume point itself is never indexed twice.</summary>
-        internal static string FtsReadLinesAfter(bool hasLimit) => hasLimit
-            ? "SELECT id, content FROM line WHERE id > @after ORDER BY id LIMIT @lim"
-            : "SELECT id, content FROM line WHERE id > @after ORDER BY id";
+        internal static string FtsReadLinesAfter(SeforimDbSchema schema, bool hasLimit) =>
+            "SELECT l.id, " + C_ContentColumn(schema, "l") +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            " WHERE l.id > @after ORDER BY l.id" + (hasLimit ? " LIMIT @lim" : "");
+
+        /// <summary>Lines per book — lets the catalog-order feed skip whole books on resume.</summary>
+        internal const string FtsLineCountsByBook = "SELECT bookId, COUNT(*) FROM line GROUP BY bookId";
+
+        /// <summary>One book's lines in reading order (lineIndex; id breaks a tie), from the
+        /// @skip-th on — the catalog-order index feed, one book at a time. Served by
+        /// idx_line_book_index.</summary>
+        internal static string FtsReadBookLines(SeforimDbSchema schema) =>
+            "SELECT l.id, " + C_ContentColumn(schema, "l") +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            " WHERE l.bookId = @b ORDER BY l.lineIndex, l.id LIMIT -1 OFFSET @skip";
 
         /// <summary>One chunk of search-result rows: content + book title in a single JOIN, so
         /// titles never need a second query. IN-list sized to the chunk.</summary>
-        internal static string FtsFetchLinesWithTitles(int count) =>
-            "SELECT l.id, l.content, b.title" +
-            " FROM line l LEFT JOIN book b ON b.id = l.bookId" +
+        internal static string FtsFetchLinesWithTitles(SeforimDbSchema schema, int count) =>
+            "SELECT l.id, " + C_ContentColumn(schema, "l") + ", b.title" +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            " LEFT JOIN book b ON b.id = l.bookId" +
             " WHERE l.id IN (" + InPlaceholders("p", count) + ")";
 
         /// <summary>
@@ -465,12 +668,16 @@ namespace KitveiHakodesh.Core.SeforimDb
         /// whole batch of short matches costs one round-trip, and the bookId bound keeps a
         /// snippet from ever bleeding across a book boundary.
         /// </summary>
-        internal static string FtsFetchNeighborLines(int count) =>
-            "SELECT m.id, n.lineIndex - m.lineIndex AS delta, n.content" +
+        internal static string FtsFetchNeighborLines(SeforimDbSchema schema, int count) =>
+            "SELECT m.id, n.lineIndex - m.lineIndex AS delta, " + C_ContentColumn(schema, "n") +
+            // The sidecar join must come AFTER this JOIN's own ON clause: putting it between
+            // `JOIN line n` and its ON is a syntax error, because the ON would then bind to
+            // the sidecar rather than to `n`.
             " FROM line m JOIN line n" +
             " ON n.bookId = m.bookId" +
             " AND n.lineIndex BETWEEN m.lineIndex - @radius AND m.lineIndex + @radius" +
             " AND n.lineIndex <> m.lineIndex" +
+            C_ContentJoin(schema, "n") +
             " WHERE m.id IN (" + InPlaceholders("p", count) + ")";
 
         // ── Catalog index build (SeforimDbCatalogIndex) ───────────────────────────────
@@ -479,8 +686,10 @@ namespace KitveiHakodesh.Core.SeforimDb
         // the same seforim.db as everything above.
 
         /// <summary>Every line of one book, in reading order — the verse-marker scan.</summary>
-        internal const string CatalogIndexBookLines =
-            "SELECT lineIndex, content FROM line WHERE bookId = @b ORDER BY lineIndex";
+        internal static string CatalogIndexBookLines(SeforimDbSchema schema) =>
+            "SELECT l.lineIndex, " + C_ContentColumn(schema, "l") +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            " WHERE l.bookId = @b ORDER BY l.lineIndex";
 
         internal const string CatalogIndexTocRowsForBook = @"
             SELECT te.id, te.parentId, tt.text, l.lineIndex
@@ -531,6 +740,21 @@ namespace KitveiHakodesh.Core.SeforimDb
             JOIN tocText tt ON tt.id = ae.textId
             LEFT JOIN line l ON l.id = ae.lineId
             ORDER BY ae.structureId, ae.id";
+
+        // Shorthands for the two line-content fragments, so a statement built by string
+        // concatenation stays on one readable line. Same thing SeforimDbLineContentSql
+        // exposes; see there for why the SQL differs per schema.
+        private static string C_ContentColumn(SeforimDbSchema schema, string lineAlias)
+            => SeforimDbLineContentSql.ContentColumn(schema, lineAlias);
+
+        private static string C_ContentExpression(SeforimDbSchema schema, string lineAlias)
+            => SeforimDbLineContentSql.ContentExpression(schema, lineAlias);
+
+        private static string C_ContentJoin(SeforimDbSchema schema, string lineAlias)
+            => SeforimDbLineContentSql.ContentJoin(schema, lineAlias);
+
+        private static string C_RawContentExpression(SeforimDbSchema schema, string lineAlias)
+            => SeforimDbLineContentSql.RawContentExpression(schema, lineAlias);
 
         internal static string InPlaceholders(string prefix, int count)
         {

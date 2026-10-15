@@ -3,6 +3,7 @@ import { ref, watch, nextTick, onMounted } from 'vue'
 import { useEventListener } from '@vueuse/core'
 import { IconSearch20Regular, IconNavigation20Regular } from '@iconify-prerendered/vue-fluent'
 import { useDropdownClose } from '@/composables/useDropdownClose'
+import { detectAvailableFonts } from '@/webview-host/fontsApi'
 import {
   getSettingsScrollTop,
   setSettingsScrollTop,
@@ -15,6 +16,7 @@ import SettingsPageThemeAndApplicationSection from './SettingsPageThemeAndApplic
 import SettingsPageBookAndCommentaryDisplaySection from './SettingsPageBookAndCommentaryDisplaySection.vue'
 import SettingsPageCensorDivineNamesSection from './SettingsPageCensorDivineNamesSection.vue'
 import SettingsPageCalendarSection from './SettingsPageCalendarSection.vue'
+import SettingsPageUpdatesSection from './SettingsPageUpdatesSection.vue'
 import SettingsPageAdvancedSection from './SettingsPageAdvancedSection.vue'
 import SettingsPageResetSection from './SettingsPageResetSection.vue'
 import SettingsPageKeyboardShortcutsSection from './SettingsPageKeyboardShortcutsSection.vue'
@@ -42,6 +44,7 @@ const searchInputRef = ref<HTMLInputElement | null>(null)
 
 const { justClosed } = useDropdownClose(navPanelRef, () => { navPanelOpen.value = false }, {
   toggleButton: navToggleRef,
+  fitToViewport: false,
 })
 
 // ── View state (this session only) ───────────────────────────────────────────
@@ -97,6 +100,9 @@ function focusSearchInput() {
 }
 
 onMounted(() => {
+  // Warm the font cache immediately so the font dropdowns are instant on first open.
+  void detectAvailableFonts()
+
   focusSearchInput()
 
   nextTick(() => {
@@ -191,6 +197,7 @@ async function navigateToSection(sectionId: string) {
         <SettingsPageBookAndCommentaryDisplaySection />
         <SettingsPageCensorDivineNamesSection />
         <SettingsPageCalendarSection />
+        <SettingsPageUpdatesSection />
         <SettingsPageAdvancedSection />
         <SettingsPageResetSection />
         <SettingsPageKeyboardShortcutsSection />
