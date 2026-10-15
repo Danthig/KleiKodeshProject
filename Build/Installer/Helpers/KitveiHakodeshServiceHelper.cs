@@ -167,7 +167,7 @@ namespace KleiKodeshVstoInstallerWpf.Helpers
                 }
                 await Task.Delay(300).ConfigureAwait(false);
             }
-            return IsServiceInstalled();
+            return IsServiceInstalledAndCurrent(serviceExe) && !IsServiceDisabled();
         }
 
         /// <summary>Status line shown while Windows prepares the admin prompt.</summary>

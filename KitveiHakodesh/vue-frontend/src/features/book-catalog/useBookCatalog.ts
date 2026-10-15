@@ -47,7 +47,8 @@ export function useBookCatalog() {
     ...currentNode.value.books.map((b) => ({ uid: `b-${b.id}`, kind: 'book' as const, book: b })),
   ])
 
-  const { results: searchItems, searching: tocSearching } = useBookCatalogSearch(searchQuery)
+  const { results: searchItems, searching: tocSearching, error: searchError } =
+    useBookCatalogSearch(searchQuery)
 
   const frequentFoldersStore = useFrequentFoldersStore()
 
@@ -100,6 +101,7 @@ export function useBookCatalog() {
     treeItems,
     searchItems,
     tocSearching,
+    searchError,
     load: store.ensureLoaded,
     enter,
     openCategory,

@@ -29,6 +29,7 @@ const {
   treeItems,
   searchItems,
   tocSearching,
+  searchError,
   load,
   enter,
   openCategory,
@@ -367,10 +368,11 @@ function onSearchEnter() {
         <!-- select-book/select-toc emit (item, openInNewTab) — the boolean is
              forwarded straight through to the pane-navigation helper. -->
         <template v-if="isSearching">
-          <LoadingAnimation v-if="tocSearching && !searchItems.length" />
+          <p v-if="searchError" class="search-error" role="alert">{{ searchError }}</p>
+          <LoadingAnimation v-else-if="tocSearching && !searchItems.length" />
           <BookCatalogSearch
-            ref="searchResultsRef"
             v-else
+            ref="searchResultsRef"
             :items="searchItems"
             :view="view"
             :searching="tocSearching"
@@ -400,6 +402,12 @@ function onSearchEnter() {
   text-align: center;
   color: var(--status-danger);
   font-size: 15px;
+}
+.search-error {
+  color: var(--status-danger);
+  font-size: 14px;
+  text-align: center;
+  padding: 16px;
 }
 .error-msg {
   display: block;

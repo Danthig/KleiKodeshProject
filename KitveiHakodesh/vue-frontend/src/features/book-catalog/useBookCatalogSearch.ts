@@ -71,6 +71,7 @@ function useLuceneCatalogSearch(searchQuery: ReturnType<typeof ref<string>>) {
   const debouncedQuery = refDebounced(searchQuery, 150)
   const results = ref<SearchFsItem[]>([])
   const searching = ref(false)
+  const error = ref<string | null>(null)
 
   let searchGeneration = 0
 
@@ -110,6 +111,7 @@ function useLuceneCatalogSearch(searchQuery: ReturnType<typeof ref<string>>) {
       searchGeneration++
       results.value = []
       searching.value = false
+      error.value = null
     }
   })
 
@@ -121,15 +123,22 @@ function useLuceneCatalogSearch(searchQuery: ReturnType<typeof ref<string>>) {
       if (!query) {
         results.value = []
         searching.value = false
+        error.value = null
         return
       }
 
       searching.value = true
+      error.value = null
       try {
+        await store.ensureLoaded()
+        if (generation !== searchGeneration) return
+        if (store.error) throw new Error(store.error)
+
         // Retry while the index is still building — a newer search supersedes the loop.
         for (;;) {
           const res = await catalogTocSearch(query)
           if (generation !== searchGeneration) return
+          if (res.error) throw new Error(res.error)
           if (res.ready && !res.superseded) {
             results.value = toItems(res.results ?? [])
             break
@@ -139,8 +148,12 @@ function useLuceneCatalogSearch(searchQuery: ReturnType<typeof ref<string>>) {
           await new Promise((resolve) => setTimeout(resolve, res.superseded ? 150 : INDEX_NOT_READY_RETRY_MS))
           if (generation !== searchGeneration) return
         }
-      } catch {
-        if (generation === searchGeneration) results.value = []
+      } catch (reason) {
+        if (generation === searchGeneration) {
+          results.value = []
+          const detail = reason instanceof Error ? reason.message : String(reason)
+          error.value = `לא ניתן להשלים את חיפוש הקטלוג: ${detail}`
+        }
       } finally {
         if (generation === searchGeneration) searching.value = false
       }
@@ -148,7 +161,7 @@ function useLuceneCatalogSearch(searchQuery: ReturnType<typeof ref<string>>) {
     { immediate: true },
   )
 
-  return { results, searching }
+  return { results, searching, error }
 }
 
 // ─── Composable ───────────────────────────────────────────────────────────────

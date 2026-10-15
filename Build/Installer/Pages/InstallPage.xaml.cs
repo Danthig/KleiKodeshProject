@@ -67,8 +67,15 @@ namespace KleiKodeshVstoInstallerWpf
                         MessageBoxButton.YesNo,
                         MessageBoxImage.Warning);
 
-                    if (retry == MessageBoxResult.Yes)
-                        await KitveiHakodeshServiceHelper.EnsureServiceInstalledAsync(_status);
+                    if (retry == MessageBoxResult.Yes &&
+                        !await KitveiHakodeshServiceHelper.EnsureServiceInstalledAsync(_status))
+                    {
+                        MessageBox.Show(
+                            "שירות כתבי הקודש לא הותקן. חיפוש הקטלוג והקבצים לא יהיה זמין עד להתקנת השירות.",
+                            "התקנת שירות אינדקס",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error);
+                    }
                 }
 
                 while (ProgressBar.Value < ProgressBar.Maximum)
