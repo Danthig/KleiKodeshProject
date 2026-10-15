@@ -733,10 +733,6 @@ jobs:
               Packages = ".\packages"
             },
             @{
-              Config = "UpdateCheckerLib\packages.config"
-              Packages = ".\packages"
-            },
-            @{
               Config = "KleiKodeshVsto\WebSitesLib\WebSitesLib\packages.config"
               Packages = ".\KleiKodeshVsto\WebSitesLib\packages"
             },
@@ -751,14 +747,6 @@ jobs:
             @{
               Config = "KitveiHakodesh\CSharpBackend\KitveiHakodeshDemoApp\packages.config"
               Packages = ".\KitveiHakodesh\CSharpBackend\packages"
-            },
-            @{
-              Config = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLib.Net48\packages.config"
-              Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
-            },
-            @{
-              Config = "KitveiHakodesh\CSharpBackend\FtsLib-Csharp\FtsLibTest\packages.config"
-              Packages = ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages"
             },
             @{
               Config = "KleiKodeshVsto\DocDesign\DocDesignLib\packages.config"
