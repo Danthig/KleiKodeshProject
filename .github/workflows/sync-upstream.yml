@@ -1264,8 +1264,6 @@ jobs:
 
           $assets = @(
             "$releaseDir/KleiKodeshSetup-$version.exe",
-            "$releaseDir/KleiKodeshSetup-$version-x64.exe",
-            "$releaseDir/KleiKodeshSetup-$version-x86.exe",
             "$releaseDir/KitveiHakodeshPortable-$version.zip"
           )
 
