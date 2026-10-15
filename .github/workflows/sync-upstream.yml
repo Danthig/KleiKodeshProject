@@ -100,11 +100,19 @@ jobs:
 
           $submodulePath = "KitveiHakodesh/CSharpBackend/DocumentLocator"
           $submoduleEntry = git ls-tree $releaseCommit -- $submodulePath
-          if ($LASTEXITCODE -ne 0 -or $submoduleEntry -notmatch '^160000 commit ([0-9a-f]{40})\s') {
-            throw "Upstream release $upstreamTag does not contain the expected DocumentLocator submodule gitlink."
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not inspect the DocumentLocator entry in upstream release $upstreamTag."
           }
 
-          $upstreamDocumentLocatorSha = $Matches[1]
+          $upstreamDocumentLocatorSha = ""
+          if ($submoduleEntry -match '^160000 commit ([0-9a-f]{40})\s') {
+            $upstreamDocumentLocatorSha = $Matches[1]
+            Write-Host "Upstream release $upstreamTag pins DocumentLocator at $upstreamDocumentLocatorSha."
+          }
+          else {
+            Write-Host "Upstream release $upstreamTag no longer uses the DocumentLocator submodule."
+          }
+
           "UPSTREAM_DOCUMENTLOCATOR_SHA=$upstreamDocumentLocatorSha" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -143,8 +151,13 @@ jobs:
 
             $publishedCommit = $publishedCommit.Trim()
             $publishedGitlink = git ls-tree $publishedCommit -- $submodulePath
-            if ($publishedGitlink -notmatch "^160000 commit $upstreamDocumentLocatorSha\s") {
-              throw "Fork release $upstreamTag does not point to the upstream release's exact DocumentLocator gitlink."
+            if (-not [string]::IsNullOrWhiteSpace($upstreamDocumentLocatorSha)) {
+              if ($publishedGitlink -notmatch "^160000 commit $upstreamDocumentLocatorSha\s") {
+                throw "Fork release $upstreamTag does not point to the upstream release's exact DocumentLocator gitlink."
+              }
+            }
+            elseif ($publishedGitlink -match '^160000 commit ') {
+              throw "Fork release $upstreamTag still contains a DocumentLocator gitlink that upstream has removed."
             }
 
             git merge-base --is-ancestor "refs/upstream/tags/$upstreamTag" $publishedCommit
@@ -170,8 +183,13 @@ jobs:
             }
 
             $forkTagSubmoduleEntry = git ls-tree $forkTagCommit -- $submodulePath
-            if ($forkTagSubmoduleEntry -notmatch "^160000 commit $upstreamDocumentLocatorSha\s") {
-              throw "Fork tag $upstreamTag points to a tree whose DocumentLocator gitlink does not match upstream release $upstreamTag ($upstreamDocumentLocatorSha). Refusing to rebuild or republish this tag."
+            if (-not [string]::IsNullOrWhiteSpace($upstreamDocumentLocatorSha)) {
+              if ($forkTagSubmoduleEntry -notmatch "^160000 commit $upstreamDocumentLocatorSha\s") {
+                throw "Fork tag $upstreamTag points to a tree whose DocumentLocator gitlink does not match upstream release $upstreamTag ($upstreamDocumentLocatorSha). Refusing to rebuild or republish this tag."
+              }
+            }
+            elseif ($forkTagSubmoduleEntry -match '^160000 commit ') {
+              throw "Fork tag $upstreamTag still contains a DocumentLocator gitlink that upstream release $upstreamTag has removed."
             }
 
             git merge-base --is-ancestor "refs/upstream/tags/$upstreamTag" $forkTagCommit
@@ -187,7 +205,7 @@ jobs:
               Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
 
-          Write-Host "[OK] Upstream release $upstreamTag and its exact DocumentLocator gitlink are verified."
+          Write-Host "[OK] Upstream release $upstreamTag and its dependency state are verified."
 
 
       # ============================================================
@@ -211,11 +229,16 @@ jobs:
           $patchSource = "Build/patches/DocumentLocator-fork-dependency-paths.patch"
           $patchForBuild = Join-Path $env:RUNNER_TEMP "DocumentLocator-fork-dependency-paths.patch"
 
-          if (-not (Test-Path $patchSource)) {
-            throw "Fork-specific DocumentLocator build patch is missing: $patchSource"
-          }
+          if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+            if (-not (Test-Path $patchSource)) {
+              throw "Fork-specific DocumentLocator build patch is missing: $patchSource"
+            }
 
-          Copy-Item $patchSource $patchForBuild -Force
+            Copy-Item $patchSource $patchForBuild -Force
+          }
+          else {
+            Write-Host "Skipping the legacy DocumentLocator patch; upstream has absorbed that project."
+          }
 
           Write-Host "Creating synchronized working branch from fork master..."
           git checkout -B $syncBranch origin/master
@@ -235,7 +258,8 @@ jobs:
           }
           else {
             Write-Host "Merging exact upstream release $env:UPSTREAM_RELEASE into the fork history..."
-            git merge --no-ff --no-edit "refs/upstream/tags/$env:UPSTREAM_RELEASE"
+            # Prefer upstream only for overlapping conflict hunks; retain non-conflicting fork changes.
+            git merge --no-ff --no-edit -X theirs "refs/upstream/tags/$env:UPSTREAM_RELEASE"
             $mergeExitCode = $LASTEXITCODE
 
             if ($mergeExitCode -ne 0) {
@@ -244,54 +268,66 @@ jobs:
               $conflicts | ForEach-Object { Write-Host " - $_" -ForegroundColor Red }
               git merge --abort
 
-              throw "Merge of upstream release $env:UPSTREAM_RELEASE failed with exit code $mergeExitCode. No conflict resolution was attempted."
+              throw "Merge of upstream release $env:UPSTREAM_RELEASE failed with exit code $mergeExitCode after preferring upstream conflict changes."
             }
 
             Write-Host "[OK] Upstream merge completed on working branch $syncBranch."
           }
 
-          Write-Host "Verifying the release-pinned DocumentLocator gitlink..."
-          $gitlinkLine = git ls-tree HEAD -- $submodulePath
-          if ($LASTEXITCODE -ne 0 -or $gitlinkLine -notmatch '^160000 commit ([0-9a-f]{40})\s') {
-            throw "The synchronized tree does not contain a valid DocumentLocator gitlink."
-          }
+          if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+            Write-Host "Verifying the release-pinned DocumentLocator gitlink..."
+            $gitlinkLine = git ls-tree HEAD -- $submodulePath
+            if ($LASTEXITCODE -ne 0 -or $gitlinkLine -notmatch '^160000 commit ([0-9a-f]{40})\s') {
+              throw "The synchronized tree does not contain a valid DocumentLocator gitlink."
+            }
 
-          $currentGitlinkSha = $Matches[1]
-          if ($currentGitlinkSha -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
-            Write-Host "Updating the fork gitlink from $currentGitlinkSha to the exact upstream release commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
-            git update-index --cacheinfo "160000,$env:UPSTREAM_DOCUMENTLOCATOR_SHA,$submodulePath"
+            $currentGitlinkSha = $Matches[1]
+            if ($currentGitlinkSha -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
+              Write-Host "Updating the fork gitlink from $currentGitlinkSha to the exact upstream release commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
+              git update-index --cacheinfo "160000,$env:UPSTREAM_DOCUMENTLOCATOR_SHA,$submodulePath"
 
+              if ($LASTEXITCODE -ne 0) {
+                throw "Failed to stage the release-pinned DocumentLocator gitlink."
+              }
+            }
+
+            git submodule update --init --recursive --checkout --force -- $submodulePath
+            $submoduleUpdateExitCode = $LASTEXITCODE
+            if ($submoduleUpdateExitCode -ne 0) {
+              throw "Could not fetch exact DocumentLocator commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA (exit code $submoduleUpdateExitCode). No remote HEAD fallback is permitted."
+            }
+
+            $resolvedGitlinkSha = (git -C $submodulePath rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0 -or $resolvedGitlinkSha -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
+              throw "DocumentLocator resolved to $resolvedGitlinkSha instead of the release-pinned commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
+            }
+
+            git add -- $submodulePath
             if ($LASTEXITCODE -ne 0) {
-              throw "Failed to stage the release-pinned DocumentLocator gitlink."
+              throw "Failed to stage the resolved DocumentLocator gitlink."
+            }
+
+            git diff --cached --quiet -- $submodulePath
+            $gitlinkDiffExitCode = $LASTEXITCODE
+            if ($gitlinkDiffExitCode -eq 1) {
+              git commit -m "Pin DocumentLocator to upstream $env:UPSTREAM_RELEASE"
+              if ($LASTEXITCODE -ne 0) {
+                throw "Failed to commit the verified release-pinned DocumentLocator gitlink."
+              }
+            }
+            elseif ($gitlinkDiffExitCode -ne 0) {
+              throw "Could not verify the staged DocumentLocator gitlink (exit code $gitlinkDiffExitCode)."
             }
           }
-
-          git submodule update --init --recursive --checkout --force -- $submodulePath
-          $submoduleUpdateExitCode = $LASTEXITCODE
-          if ($submoduleUpdateExitCode -ne 0) {
-            throw "Could not fetch exact DocumentLocator commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA (exit code $submoduleUpdateExitCode). No remote HEAD fallback is permitted."
-          }
-
-          $resolvedGitlinkSha = (git -C $submodulePath rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0 -or $resolvedGitlinkSha -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
-            throw "DocumentLocator resolved to $resolvedGitlinkSha instead of the release-pinned commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
-          }
-
-          git add -- $submodulePath
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to stage the resolved DocumentLocator gitlink."
-          }
-
-          git diff --cached --quiet -- $submodulePath
-          $gitlinkDiffExitCode = $LASTEXITCODE
-          if ($gitlinkDiffExitCode -eq 1) {
-            git commit -m "Pin DocumentLocator to upstream $env:UPSTREAM_RELEASE"
+          else {
+            $gitlinkLine = git ls-tree HEAD -- $submodulePath
             if ($LASTEXITCODE -ne 0) {
-              throw "Failed to commit the verified release-pinned DocumentLocator gitlink."
+              throw "Could not inspect the synchronized tree for a stale DocumentLocator gitlink."
             }
-          }
-          elseif ($gitlinkDiffExitCode -ne 0) {
-            throw "Could not verify the staged DocumentLocator gitlink (exit code $gitlinkDiffExitCode)."
+            if ($gitlinkLine -match '^160000 commit ') {
+              throw "The synchronized tree still contains a DocumentLocator gitlink although upstream has removed it."
+            }
+            Write-Host "No DocumentLocator submodule is expected for this upstream release."
           }
 
           if (-not [string]::IsNullOrWhiteSpace($env:FORK_EXISTING_RELEASE_TAG_COMMIT)) {
@@ -459,34 +495,39 @@ jobs:
           Write-Host "[OK] Submodules match the exact gitlink commit state from the synchronized tree."
           $submoduleStatus | ForEach-Object { Write-Host $_ }
 
-          $documentLocatorPath = "KitveiHakodesh/CSharpBackend/DocumentLocator"
-          $documentLocatorCommit = (git -C $documentLocatorPath rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0 -or $documentLocatorCommit -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
-            throw "DocumentLocator resolved to $documentLocatorCommit instead of release-pinned commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
-          }
+          if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+            $documentLocatorPath = "KitveiHakodesh/CSharpBackend/DocumentLocator"
+            $documentLocatorCommit = (git -C $documentLocatorPath rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0 -or $documentLocatorCommit -ne $env:UPSTREAM_DOCUMENTLOCATOR_SHA) {
+              throw "DocumentLocator resolved to $documentLocatorCommit instead of release-pinned commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA."
+            }
 
-          $patchForBuild = Join-Path $env:RUNNER_TEMP "DocumentLocator-fork-dependency-paths.patch"
-          if (-not (Test-Path $patchForBuild)) {
-            throw "Fork-specific DocumentLocator build patch is missing: $patchForBuild"
-          }
+            $patchForBuild = Join-Path $env:RUNNER_TEMP "DocumentLocator-fork-dependency-paths.patch"
+            if (-not (Test-Path $patchForBuild)) {
+              throw "Fork-specific DocumentLocator build patch is missing: $patchForBuild"
+            }
 
-          git -C $documentLocatorPath apply --check --unidiff-zero $patchForBuild
-          if ($LASTEXITCODE -ne 0) {
-            throw "Fork-specific DocumentLocator patch does not apply to release commit $documentLocatorCommit."
-          }
+            git -C $documentLocatorPath apply --check --unidiff-zero $patchForBuild
+            if ($LASTEXITCODE -ne 0) {
+              throw "Fork-specific DocumentLocator patch does not apply to release commit $documentLocatorCommit."
+            }
 
-          git -C $documentLocatorPath apply --unidiff-zero $patchForBuild
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to apply the fork-specific DocumentLocator build patch."
-          }
+            git -C $documentLocatorPath apply --unidiff-zero $patchForBuild
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to apply the fork-specific DocumentLocator build patch."
+            }
 
-          $patchedProject = Get-Content "$documentLocatorPath\DocumentLocator.Service\DocumentLocator.Service.csproj" -Raw
-          if ($patchedProject -notmatch [regex]::Escape("System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll") -or
-              $patchedProject -notmatch [regex]::Escape("System.ValueTuple.4.6.1\lib\net47\System.ValueTuple.dll")) {
-            throw "The fork-specific DocumentLocator dependency paths were not applied to the build source."
-          }
+            $patchedProject = Get-Content "$documentLocatorPath\DocumentLocator.Service\DocumentLocator.Service.csproj" -Raw
+            if ($patchedProject -notmatch [regex]::Escape("System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll") -or
+                $patchedProject -notmatch [regex]::Escape("System.ValueTuple.4.6.1\lib\net47\System.ValueTuple.dll")) {
+              throw "The fork-specific DocumentLocator dependency paths were not applied to the build source."
+            }
 
-          Write-Host "[OK] Fork-specific DocumentLocator dependency paths are applied to the build source."
+            Write-Host "[OK] Fork-specific DocumentLocator dependency paths are applied to the build source."
+          }
+          else {
+            Write-Host "Skipping legacy DocumentLocator checks for this upstream release."
+          }
 
 
       # ============================================================
@@ -639,40 +680,42 @@ jobs:
           Write-Host "[OK] WpfLib restore"
 
 
-          # --------------------------------------------------------
-          # DocumentLocator SDK project
-          # --------------------------------------------------------
+          if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+            # --------------------------------------------------------
+            # Legacy DocumentLocator SDK project
+            # --------------------------------------------------------
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "Restoring DocumentLocator SDK project"
-          Write-Host "========================================"
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host "Restoring DocumentLocator SDK project"
+            Write-Host "========================================"
 
-          $documentLocatorProject = `
-            "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\DocumentLocator.csproj"
+            $documentLocatorProject = `
+              "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\DocumentLocator.csproj"
 
-          if (-not (Test-Path $documentLocatorProject)) {
-            throw "DocumentLocator project not found: $documentLocatorProject"
+            if (-not (Test-Path $documentLocatorProject)) {
+              throw "DocumentLocator project not found: $documentLocatorProject"
+            }
+
+            & $env:MSBUILD_PATH `
+              $documentLocatorProject `
+              /t:Restore `
+              /p:Configuration=Release `
+              /p:Platform=AnyCPU
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "MSBuild restore failed for DocumentLocator.csproj with exit code $LASTEXITCODE"
+            }
+
+            $documentLocatorAssets = `
+              "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json"
+
+            if (-not (Test-Path $documentLocatorAssets)) {
+              throw "DocumentLocator restore did not create project.assets.json"
+            }
+
+            Write-Host "[OK] DocumentLocator SDK project restore"
           }
-
-          & $env:MSBUILD_PATH `
-            $documentLocatorProject `
-            /t:Restore `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "MSBuild restore failed for DocumentLocator.csproj with exit code $LASTEXITCODE"
-          }
-
-          $documentLocatorAssets = `
-            "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\obj\project.assets.json"
-
-          if (-not (Test-Path $documentLocatorAssets)) {
-            throw "DocumentLocator restore did not create project.assets.json"
-          }
-
-          Write-Host "[OK] DocumentLocator SDK project restore"
 
 
           # --------------------------------------------------------
@@ -728,20 +771,25 @@ jobs:
             @{
               Config = "KleiKodeshVsto\RegexInWord\RegexFindLib\packages.config"
               Packages = ".\KleiKodeshVsto\RegexInWord\RegexFindLib\packages"
-            },
-            @{
-              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
-              Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
-            },
-            @{
-              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
-              Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
-            },
-            @{
-              Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
-              Packages = ".\packages"
             }
           )
+
+          if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+            $legacyRestores += @(
+              @{
+                Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator\packages.config"
+                Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
+              },
+              @{
+                Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
+                Packages = ".\KitveiHakodesh\CSharpBackend\DocumentLocator\packages"
+              },
+              @{
+                Config = "KitveiHakodesh\CSharpBackend\DocumentLocator\DocumentLocator.Service\packages.config"
+                Packages = ".\packages"
+              }
+            )
+          }
 
           foreach ($restore in $legacyRestores) {
 
@@ -775,6 +823,7 @@ jobs:
           }
 
 
+          if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
           # ========================================================
           # FIX:
           # Explicitly install System.ValueTuple 4.5.0
@@ -853,6 +902,7 @@ jobs:
           }
 
           Write-Host "[OK] System.Runtime.CompilerServices.Unsafe 4.3.0"
+          }
 
 
           # ========================================================
@@ -985,6 +1035,10 @@ jobs:
 
             ".\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll"
           )
+
+          if ([string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+            $requiredFiles = @($requiredFiles | Where-Object { $_ -notmatch '\\DocumentLocator\\' })
+          }
 
           foreach ($file in $requiredFiles) {
 
@@ -1272,8 +1326,13 @@ jobs:
 
             $publishedCommit = $publishedCommit.Trim()
             $publishedGitlink = git ls-tree $publishedCommit -- "KitveiHakodesh/CSharpBackend/DocumentLocator"
-            if ($publishedGitlink -notmatch "^160000 commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA\s") {
-              throw "Existing release $version points to a tree with a DocumentLocator gitlink different from upstream ($env:UPSTREAM_DOCUMENTLOCATOR_SHA). No changes were made."
+            if (-not [string]::IsNullOrWhiteSpace($env:UPSTREAM_DOCUMENTLOCATOR_SHA)) {
+              if ($publishedGitlink -notmatch "^160000 commit $env:UPSTREAM_DOCUMENTLOCATOR_SHA\s") {
+                throw "Existing release $version points to a tree with a DocumentLocator gitlink different from upstream ($env:UPSTREAM_DOCUMENTLOCATOR_SHA). No changes were made."
+              }
+            }
+            elseif ($publishedGitlink -match '^160000 commit ') {
+              throw "Existing release $version still contains a DocumentLocator gitlink that upstream has removed. No changes were made."
             }
 
             git merge-base --is-ancestor "refs/upstream/tags/$version" $publishedCommit
