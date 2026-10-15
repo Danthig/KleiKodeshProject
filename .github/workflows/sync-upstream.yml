@@ -917,7 +917,6 @@ jobs:
 
             ".\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
             ".\packages\Microsoft.Web.WebView2.1.0.3912.50\build\Microsoft.Web.WebView2.targets",
-            ".\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
 
             # ------------------------------------------------------
             # WebSitesLib
@@ -936,8 +935,6 @@ jobs:
             # ------------------------------------------------------
 
             ".\KitveiHakodesh\CSharpBackend\packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets",
-
-            ".\KitveiHakodesh\CSharpBackend\FtsLib-Csharp\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.119.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets",
 
             # ------------------------------------------------------
             # WpfLib
