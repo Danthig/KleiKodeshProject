@@ -1,4 +1,5 @@
 ﻿using KitveiHakodeshLib.Dictionary;
+using KleiKodesh.Helpers;
 using KleiKodesh.Ribbon;
 using KitveiHakodeshLib.Pdf;
 using Office = Microsoft.Office.Core;
